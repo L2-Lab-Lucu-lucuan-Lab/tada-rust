@@ -1,7 +1,7 @@
-﻿use super::*;
+use super::*;
 use arabic_reshaper::ArabicReshaper;
 use ratatui::layout::Alignment;
-use ratatui::widgets::Padding;
+use ratatui::widgets::{Gauge, Padding};
 use unicode_bidi::BidiInfo;
 use unicode_normalization::UnicodeNormalization;
 
@@ -16,9 +16,7 @@ fn format_arabic(text: &str, max_width: Option<u16>) -> String {
     }
 
     let normalized: String = text.nfkc().collect();
-
     let reshaped = reshaper.reshape(&normalized);
-
     let lines = if let Some(width) = max_width {
         if width > 0 {
             textwrap::wrap(&reshaped, width as usize)
@@ -36,7 +34,7 @@ fn format_arabic(text: &str, max_width: Option<u16>) -> String {
         }
 
         let bidi_info = BidiInfo::new(line, Some(unicode_bidi::Level::rtl()));
-        if let Some(para) = bidi_info.paragraphs.get(0) {
+        if let Some(para) = bidi_info.paragraphs.first() {
             let range = para.range.clone();
             result.push_str(&bidi_info.reorder_line(para, range));
         } else {
@@ -47,42 +45,127 @@ fn format_arabic(text: &str, max_width: Option<u16>) -> String {
     result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReaderDensity {
+    Wide,
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewportMode {
+    density: ReaderDensity,
+    show_sidebar: bool,
+    sidebar_width: u16,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct UiScale {
-    outer_margin_x: u16,
-    outer_margin_y: u16,
-    split_gap: u16,
+    header_height: u16,
     footer_height: u16,
 }
 
 impl UiScale {
     fn from_area(area: Rect) -> Self {
-        let outer_margin_x = 0;
-        let outer_margin_y = 0;
-        let split_gap = if area.width >= 120 { 1 } else { 0 };
-        let footer_height = if area.height >= 30 { 3 } else { 2 };
-
         Self {
-            outer_margin_x,
-            outer_margin_y,
-            split_gap,
-            footer_height,
+            header_height: 2,
+            footer_height: if area.height >= 28 { 4 } else { 3 },
         }
     }
 }
 
+fn reader_density(area: Rect) -> ReaderDensity {
+    if area.width >= 104 && area.height >= 26 {
+        ReaderDensity::Wide
+    } else {
+        ReaderDensity::Compact
+    }
+}
+
+fn ayah_row_height(density: ReaderDensity, show_translation: bool) -> u16 {
+    match (density, show_translation) {
+        (ReaderDensity::Wide, true) => 8,
+        (ReaderDensity::Wide, false) => 6,
+        (ReaderDensity::Compact, true) => 9,
+        (ReaderDensity::Compact, false) => 7,
+    }
+}
+
+fn padded_arabic_text(text: &str, height: u16) -> String {
+    if height == 0 || text.is_empty() {
+        return text.to_string();
+    }
+
+    let line_count = text.lines().count().max(1) as u16;
+    if line_count >= height {
+        return text.to_string();
+    }
+
+    let spare_lines = height - line_count;
+    let top_padding = if spare_lines > 1 { 1 } else { 0 };
+    let bottom_padding = 0;
+    let mut result = String::new();
+
+    for _ in 0..top_padding {
+        result.push('\n');
+    }
+    result.push_str(text);
+    for _ in 0..bottom_padding {
+        result.push('\n');
+    }
+
+    result
+}
+
+fn pad_line_end(mut line: Line<'static>, width: u16) -> Line<'static> {
+    let target_width = width as usize;
+    let content_width = line.width();
+    if target_width > content_width {
+        line.spans
+            .push(Span::raw(" ".repeat(target_width - content_width)));
+    }
+    line
+}
+
+fn sidebar_width(area_width: u16) -> u16 {
+    let preferred = area_width.saturating_mul(24) / 100;
+    let min_sidebar = 28;
+    let max_sidebar = area_width.saturating_sub(72).max(min_sidebar);
+    preferred.max(min_sidebar).min(max_sidebar)
+}
+
+pub(super) fn can_show_sidebar_in_frame(area: Rect) -> bool {
+    let scale = UiScale::from_area(area);
+    let body_height = area
+        .height
+        .saturating_sub(scale.header_height + scale.footer_height);
+    area.width >= 132 && body_height >= 28
+}
+
+fn viewport_mode(area: Rect, state: &TuiState) -> ViewportMode {
+    ViewportMode {
+        density: reader_density(area),
+        show_sidebar: !state.sidebar_collapsed && can_show_sidebar_in_frame(area),
+        sidebar_width: sidebar_width(area.width),
+    }
+}
+
 pub(super) fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
+    frame.render_widget(Clear, frame.area());
     frame.render_widget(Block::default().style(state.theme.app_bg), frame.area());
 
     let scale = UiScale::from_area(frame.area());
-    let content = inset_rect(frame.area(), scale.outer_margin_x, scale.outer_margin_y);
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(scale.footer_height)])
-        .split(content);
+        .constraints([
+            Constraint::Length(scale.header_height),
+            Constraint::Min(1),
+            Constraint::Length(scale.footer_height),
+        ])
+        .split(frame.area());
 
-    draw_body(frame, root[0], state, scale);
-    draw_footer(frame, root[1], state);
+    draw_header(frame, root[0], state);
+    draw_body(frame, root[1], state);
+    draw_footer(frame, root[2], state);
 
     match state.mode {
         UiMode::CommandPalette => draw_palette_overlay(frame, state),
@@ -93,54 +176,129 @@ pub(super) fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     }
 }
 
-fn draw_body(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState, scale: UiScale) {
-    if state.sidebar_collapsed {
-        draw_reader_workspace(frame, area, state);
+fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .style(state.theme.panel)
+        .border_style(state.theme.frame)
+        .padding(Padding::new(1, 1, 0, 0));
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    if inner.height == 0 {
         return;
     }
 
-    let side_width = sidebar_width(area.width);
-    let chunks = if scale.split_gap > 0 {
-        Layout::default()
+    let current_ref = state
+        .current_ayah()
+        .map(|ayah| format!("{}:{}", ayah.surah_no, ayah.ayah_no))
+        .unwrap_or_else(|| "-".to_string());
+    let summary = Line::from(vec![
+        Span::styled(
+            format!(
+                "{:02}. {}",
+                state.current_surah().surah_no,
+                state.current_surah().name_id.to_ascii_uppercase()
+            ),
+            state.theme.strong,
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("{} ayat", state.current_surah().ayah_count),
+            state.theme.muted,
+        ),
+        Span::raw("  "),
+        Span::styled(format!("ayat aktif {current_ref}"), state.theme.accent),
+    ]);
+    let summary_width = summary.width().min(inner.width as usize) as u16;
+
+    if inner.width > summary_width.saturating_add(8) {
+        let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(side_width),
-                Constraint::Length(scale.split_gap),
-                Constraint::Min(1),
-            ])
-            .split(area)
+            .constraints([Constraint::Min(1), Constraint::Length(summary_width)])
+            .split(inner);
+        frame.render_widget(
+            Paragraph::new(pad_line_end(build_nav_line(state), cols[0].width))
+                .style(state.theme.frame),
+            cols[0],
+        );
+        frame.render_widget(
+            Paragraph::new(summary)
+                .style(state.theme.frame)
+                .alignment(Alignment::Right),
+            cols[1],
+        );
     } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(side_width), Constraint::Min(1)])
-            .split(area)
-    };
-
-    draw_surah_sidebar(frame, chunks[0], state);
-
-    let reader_idx = if scale.split_gap > 0 { 2 } else { 1 };
-    draw_reader_workspace(frame, chunks[reader_idx], state);
+        frame.render_widget(
+            Paragraph::new(pad_line_end(build_nav_line(state), inner.width)).style(state.theme.frame),
+            inner,
+        );
+    }
 }
 
-fn sidebar_width(area_width: u16) -> u16 {
-    let preferred = area_width.saturating_mul(30) / 100;
-    let min_sidebar = 26;
-    let max_sidebar = area_width.saturating_sub(46);
-    let capped_max = max_sidebar
-        .max(min_sidebar)
-        .min(area_width.saturating_sub(1));
-    preferred.max(min_sidebar).min(capped_max)
+fn build_nav_line(state: &TuiState) -> Line<'static> {
+    let active_reader = matches!(state.mode, UiMode::Reading)
+        && (state.sidebar_collapsed || state.focus == PaneFocus::AyahReader);
+    let active_surah = matches!(state.mode, UiMode::Reading)
+        && !state.sidebar_collapsed
+        && state.focus == PaneFocus::SurahCards;
+    let active_search = matches!(state.mode, UiMode::SearchInline);
+    let active_bookmark = matches!(state.mode, UiMode::BookmarkOverlay);
+    let active_help = matches!(state.mode, UiMode::HelpOverlay);
+
+    let tab_style = |active: bool| {
+        if active {
+            state.theme.chip
+        } else {
+            state.theme.muted
+        }
+    };
+
+    Line::from(vec![
+        Span::styled("TADA", state.theme.accent),
+        Span::raw(""),
+        Span::styled("RUST", state.theme.chip),
+        Span::raw(" "),
+        Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), state.theme.muted),
+        Span::raw("  "),
+        Span::styled(" READER ", tab_style(active_reader)),
+        Span::raw(" "),
+        Span::styled(" SURAH ", tab_style(active_surah)),
+        Span::raw(" "),
+        Span::styled(" SEARCH ", tab_style(active_search)),
+        Span::raw(" "),
+        Span::styled(" BOOKMARK ", tab_style(active_bookmark)),
+        Span::raw(" "),
+        Span::styled(" HELP ", tab_style(active_help)),
+    ])
+}
+
+fn draw_body(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
+    let viewport = viewport_mode(area, state);
+    if viewport.show_sidebar {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(viewport.sidebar_width),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .split(area);
+        draw_surah_sidebar(frame, chunks[0], state);
+        draw_reader_workspace(frame, chunks[2], state, viewport);
+    } else {
+        draw_reader_workspace(frame, area, state, viewport);
+    }
 }
 
 fn draw_surah_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
-    let title = if state.focus == PaneFocus::SurahCards {
-        "Daftar Surat [Fokus]"
-    } else {
-        "Daftar Surat"
-    };
-
     let outer = Block::default()
-        .title(title)
+        .title(if state.focus == PaneFocus::SurahCards {
+            "Surah Browser [Focus]"
+        } else {
+            "Surah Browser"
+        })
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .style(state.theme.panel)
@@ -149,7 +307,7 @@ fn draw_surah_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
         } else {
             state.theme.frame
         })
-        .padding(Padding::new(2, 2, 0, 0));
+        .padding(Padding::new(1, 1, 0, 0));
     frame.render_widget(outer.clone(), area);
 
     let inner = outer.inner(area);
@@ -160,144 +318,169 @@ fn draw_surah_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
-            Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Min(1),
+            Constraint::Length(2),
         ])
         .split(inner);
 
-    let search_text = if state.surah_filter.is_empty() {
-        Line::from(Span::styled("Cari surat...", state.theme.muted))
+    let filter_line = if state.surah_filter.is_empty() {
+        Line::from(vec![
+            Span::styled("Filter ", state.theme.muted),
+            Span::styled("ketik nama/nomor surat", state.theme.frame),
+        ])
     } else {
         Line::from(vec![
-            Span::styled("Filter: ", state.theme.muted),
-            Span::styled(&state.surah_filter, state.theme.accent),
+            Span::styled("Filter ", state.theme.muted),
+            Span::styled(state.surah_filter.clone(), state.theme.accent),
         ])
     };
-    let search = Paragraph::new(search_text).style(state.theme.frame).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .padding(Padding::horizontal(1))
-            .border_style(if state.focus == PaneFocus::SurahCards {
-                state.theme.accent
-            } else {
-                state.theme.frame
-            }),
+    frame.render_widget(
+        Paragraph::new(filter_line).style(state.theme.frame).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(state.theme.frame),
+        ),
+        sections[0],
     );
-    frame.render_widget(search, sections[0]);
 
     let filtered = state.filtered_surah_indices();
     if filtered.is_empty() {
         frame.render_widget(
-            Paragraph::new("Tidak ada hasil filter.")
+            Paragraph::new("Tidak ada surat yang cocok.")
                 .style(state.theme.muted)
-                .block(Block::default().borders(Borders::TOP)),
-            sections[2],
+                .alignment(Alignment::Center),
+            sections[1],
         );
+    } else {
+        let item_height: u16 = 3;
+        let visible_items = ((sections[1].height as usize) / item_height as usize).max(1);
+        let cursor_pos = filtered
+            .iter()
+            .position(|&idx| idx == state.surah_cursor_idx)
+            .unwrap_or(0);
+        let window = compute_visible_window(cursor_pos, filtered.len(), visible_items);
+
+        let mut constraints: Vec<Constraint> = (0..visible_items)
+            .map(|_| Constraint::Length(item_height))
+            .collect();
+        constraints.push(Constraint::Min(0));
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(sections[1]);
+
+        for slot in 0..visible_items {
+            let filtered_idx = window.start + slot;
+            if filtered_idx >= window.end {
+                break;
+            }
+
+            let surah_idx = filtered[filtered_idx];
+            let surah = &state.surahs[surah_idx];
+            let is_selected = surah_idx == state.selected_surah_idx;
+            let is_cursor = surah_idx == state.surah_cursor_idx;
+            let is_focus = state.focus == PaneFocus::SurahCards && is_cursor;
+            let style = if is_focus {
+                state.theme.card_focus
+            } else if is_selected {
+                state.theme.card_active
+            } else {
+                state.theme.card
+            };
+
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(format!("{:>3}", surah.surah_no), state.theme.accent),
+                    Span::raw(" "),
+                    Span::styled(&surah.name_id, state.theme.strong),
+                ]),
+                Line::from(vec![
+                    Span::styled(format_arabic(&surah.name_ar, None), state.theme.frame),
+                    Span::raw("  "),
+                    Span::styled(format!("{} ayat", surah.ayah_count), state.theme.muted),
+                ]),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .style(style)
+                    .wrap(Wrap { trim: true })
+                    .block(
+                        Block::default()
+                            .borders(Borders::BOTTOM)
+                            .style(style)
+                            .border_style(if is_focus {
+                                state.theme.accent
+                            } else {
+                                state.theme.frame
+                            })
+                            .padding(Padding::new(1, 0, 0, 0)),
+                    ),
+                rows[slot],
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", state.theme.chip),
+            Span::raw(" buka  "),
+            Span::styled("Tab", state.theme.chip),
+            Span::raw(" fokus"),
+        ]))
+        .style(state.theme.frame),
+        sections[2],
+    );
+}
+
+fn draw_reader_workspace(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &TuiState,
+    viewport: ViewportMode,
+) {
+    let surface = Block::default()
+        .style(state.theme.app_bg)
+        .padding(Padding::new(1, 1, 0, 0));
+    frame.render_widget(surface.clone(), area);
+    let inner = surface.inner(area);
+    if inner.height < 4 {
         return;
     }
 
-    let card_height: u16 = 5;
-    let visible_cards = ((sections[2].height as usize) / card_height as usize).max(1);
-    let cursor_pos = filtered
-        .iter()
-        .position(|&idx| idx == state.surah_cursor_idx)
-        .unwrap_or(0);
-    let window = compute_visible_window(cursor_pos, filtered.len(), visible_cards);
-
-    let mut constraints: Vec<Constraint> = (0..visible_cards)
-        .map(|_| Constraint::Length(card_height))
-        .collect();
-    constraints.push(Constraint::Min(0));
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(sections[2]);
-
-    for slot in 0..visible_cards {
-        let filtered_idx = window.start + slot;
-        if filtered_idx >= window.end {
-            break;
-        }
-
-        let surah_idx = filtered[filtered_idx];
-        let surah = &state.surahs[surah_idx];
-        let is_selected = surah_idx == state.selected_surah_idx;
-        let is_cursor = surah_idx == state.surah_cursor_idx;
-        let is_focus = state.focus == PaneFocus::SurahCards && is_cursor;
-
-        let card_style = if is_focus {
-            state.theme.card_focus
-        } else if is_selected {
-            state.theme.card_active
-        } else {
-            state.theme.card
-        };
-
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(format!("{:>3}. ", surah.surah_no), state.theme.muted),
-                Span::styled(&surah.name_id, state.theme.strong),
-            ]),
-            Line::from(vec![
-                Span::styled(format!("{} ayat", surah.ayah_count), state.theme.muted),
-                Span::raw("  |  "),
-                Span::styled(
-                    format_arabic(&surah.name_ar, None),
-                    state.theme.accent.add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            if is_selected {
-                Line::from(Span::styled("TERBUKA", state.theme.chip))
-            } else {
-                Line::from(Span::styled("Enter untuk buka", state.theme.muted))
-            },
-        ];
-
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(card_style)
-                .wrap(Wrap { trim: true })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .padding(Padding::new(2, 2, 1, 0))
-                        .style(card_style)
-                        .border_style(if is_focus {
-                            state.theme.accent
-                        } else {
-                            state.theme.frame
-                        }),
-                ),
-            rows[slot],
-        );
-    }
-}
-
-fn draw_reader_workspace(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
-    let workspace = inset_rect(area, 0, 0);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(6),
-            Constraint::Length(4),
-            Constraint::Min(1),
-        ])
-        .split(workspace);
+        .constraints([Constraint::Length(4), Constraint::Min(1)])
+        .split(inner);
 
-    draw_surah_summary(frame, sections[0], state);
-    draw_control_bar(frame, sections[1], state);
-    draw_ayah_list(frame, sections[2], state);
+    draw_reader_summary(frame, sections[0], state);
+    draw_ayah_list(frame, sections[1], state, viewport);
 }
 
-fn draw_surah_summary(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
-    let surah = state.current_surah();
-    let progress = state
-        .current_ayah()
-        .map(|a| format!("{}:{}", a.surah_no, a.ayah_no))
-        .unwrap_or_else(|| "-".to_string());
+fn draw_reader_summary(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .style(state.theme.panel)
+        .border_style(state.theme.frame);
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let cols = if inner.width >= 74 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(26)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1)])
+            .split(inner)
+    };
 
     let (audio_state, speed) = if let Some(player) = &state.player {
         let status = if player.is_paused() { "PAUSE" } else { "PLAY" };
@@ -306,122 +489,85 @@ fn draw_surah_summary(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
         ("STOP", "1.00x".to_string())
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(state.theme.panel)
-        .border_style(state.theme.frame)
-        .padding(Padding::new(2, 2, 0, 0));
-    frame.render_widget(block.clone(), area);
-
-    let inner = block.inner(area);
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(1), Constraint::Length(16)])
-        .split(inner);
-
-    let left = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{}. {}", surah.surah_no, surah.name_id),
-                state.theme.strong,
-            ),
-            Span::styled("  |  Surat Aktif", state.theme.muted),
-        ]),
-        Line::from(vec![
-            Span::styled(format!("{} ayat", surah.ayah_count), state.theme.muted),
-            Span::raw("  |  "),
-            Span::styled(format!("posisi {}", progress), state.theme.muted),
-            Span::raw("  |  "),
-            Span::styled(
-                format!("audio {} @ {}", audio_state, speed),
-                state.theme.accent,
-            ),
-        ]),
-        Line::from(vec![Span::styled(
-            format!(
-                "Qari: {} ({})",
-                state.active_qari,
-                qari_name(&state.active_qari)
-            ),
-            state.theme.frame,
-        )]),
-    ];
-    frame.render_widget(
-        Paragraph::new(left)
-            .style(state.theme.frame)
-            .wrap(Wrap { trim: true }),
-        cols[0],
-    );
-
-    frame.render_widget(
-        Paragraph::new(format_arabic(&surah.name_ar, None))
-            .style(state.theme.accent.add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Right),
-        cols[1],
-    );
-}
-
-fn draw_control_bar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
-    let translit_on = state
-        .current_ayah()
-        .and_then(|a| a.transliteration.as_ref())
-        .is_some();
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Ayat: ", state.theme.muted),
-            Span::styled("[Semua]", state.theme.card_focus),
-            Span::raw("  "),
-            Span::styled("Qari: ", state.theme.muted),
-            Span::styled(
-                format!("[{}]", qari_name(&state.active_qari)),
-                state.theme.card_focus,
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Transliterasi ", state.theme.muted),
-            Span::styled(if translit_on { "[ON]" } else { "[OFF]" }, state.theme.chip),
-            Span::raw("  "),
-            Span::styled("Terjemahan ", state.theme.muted),
-            Span::styled(
-                if state.show_translation {
-                    "[ON]"
-                } else {
-                    "[OFF]"
-                },
-                state.theme.chip,
-            ),
-            Span::raw("  "),
-            Span::styled("[Play Audio Full]", state.theme.accent),
-        ]),
-    ];
-
-    frame.render_widget(
-        Paragraph::new(lines).style(state.theme.frame).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .padding(Padding::new(2, 2, 0, 0))
-                .style(state.theme.panel)
-                .border_style(state.theme.frame),
+    let summary_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(cols[0]);
+    let summary_lines = [
+        pad_line_end(
+            Line::from(vec![
+                Span::styled("SURAH ", state.theme.muted),
+                Span::styled(
+                    state.current_surah().name_id.to_ascii_uppercase(),
+                    state.theme.strong,
+                ),
+                Span::raw("  "),
+                Span::styled(format!(" {} ", audio_state), state.theme.chip),
+            ]),
+            cols[0].width,
         ),
-        area,
-    );
+        pad_line_end(
+            Line::from(vec![
+                Span::styled(
+                    format!("Qari {}", qari_name(&state.active_qari)),
+                    state.theme.frame,
+                ),
+                Span::raw("  "),
+                Span::styled(format!("speed {speed}"), state.theme.muted),
+                Span::raw("  "),
+                Span::styled(
+                    if state.show_translation {
+                        "terjemahan aktif"
+                    } else {
+                        "reader fokus Arabic"
+                    },
+                    state.theme.accent,
+                ),
+            ]),
+            cols[0].width,
+        ),
+        pad_line_end(
+            Line::from(vec![Span::styled(
+                if state.sidebar_collapsed {
+                    "Ctrl+B untuk membuka panel surat."
+                } else {
+                    "Panel surat terbuka. Ketik untuk filter."
+                },
+                state.theme.muted,
+            )]),
+            cols[0].width,
+        ),
+    ];
+    for (idx, line) in summary_lines.into_iter().enumerate() {
+        if idx < summary_rows.len() {
+            frame.render_widget(
+                Paragraph::new(line).style(state.theme.frame),
+                summary_rows[idx],
+            );
+        }
+    }
+
+    if cols.len() > 1 {
+        frame.render_widget(
+            Paragraph::new(format_arabic(&state.current_surah().name_ar, None))
+                .style(state.theme.strong)
+                .alignment(Alignment::Right),
+            cols[1],
+        );
+    }
 }
 
-fn draw_ayah_list(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
-    let container = Block::default()
-        .title("Daftar Ayat")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(state.theme.panel)
-        .border_style(state.theme.frame)
-        .padding(Padding::new(2, 2, 0, 0));
-    frame.render_widget(container.clone(), area);
-
-    let list_area = container.inner(area);
-    if list_area.width < 20 || list_area.height < 4 {
+fn draw_ayah_list(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &TuiState,
+    viewport: ViewportMode,
+) {
+    if area.width < 20 || area.height < 4 {
         return;
     }
 
@@ -430,122 +576,244 @@ fn draw_ayah_list(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) 
             Paragraph::new("Belum ada ayat untuk surah ini.")
                 .style(state.theme.muted)
                 .alignment(Alignment::Center),
-            list_area,
+            area,
         );
         return;
     }
 
-    let card_height = ayah_card_height(state, list_area);
-    let visible_cards = ((list_area.height as usize) / card_height as usize).max(1);
-    let window = compute_visible_window(state.selected_ayah_idx, state.ayahs.len(), visible_cards);
+    let row_height = ayah_row_height(viewport.density, state.show_translation);
+    let visible_rows = ((area.height as usize) / row_height as usize).max(1);
+    let window = compute_visible_window(state.selected_ayah_idx, state.ayahs.len(), visible_rows);
 
-    let mut constraints: Vec<Constraint> = (0..visible_cards)
-        .map(|_| Constraint::Length(card_height))
+    let mut constraints: Vec<Constraint> = (0..visible_rows)
+        .map(|_| Constraint::Length(row_height))
         .collect();
     constraints.push(Constraint::Min(0));
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(list_area);
+        .split(area);
 
-    for slot in 0..visible_cards {
+    for slot in 0..visible_rows {
         let ayah_idx = window.start + slot;
         if ayah_idx >= window.end {
             break;
         }
-        draw_ayah_card(
+        draw_ayah_row(
             frame,
             rows[slot],
             &state.ayahs[ayah_idx],
             ayah_idx == state.selected_ayah_idx,
             state,
+            viewport.density,
         );
     }
 }
 
-fn ayah_card_height(state: &TuiState, area: Rect) -> u16 {
-    let mut height = 7;
-    if state.show_translation {
-        height += 3;
+fn draw_ayah_row(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    ayah: &Ayah,
+    is_selected: bool,
+    state: &TuiState,
+    density: ReaderDensity,
+) {
+    let base_style = if is_selected {
+        state.theme.card_focus
+    } else {
+        state.theme.card
+    };
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .style(base_style)
+        .border_style(if is_selected {
+            state.theme.accent
+        } else {
+            state.theme.muted
+        });
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    if inner.height < 3 {
+        return;
     }
-    if area.width < 92 {
-        height += 3;
+
+    match density {
+        ReaderDensity::Wide => draw_ayah_row_wide(frame, inner, ayah, is_selected, state),
+        ReaderDensity::Compact => draw_ayah_row_compact(frame, inner, ayah, is_selected, state),
     }
-    height
 }
 
-fn draw_ayah_card(
+fn draw_ayah_row_wide(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     ayah: &Ayah,
     is_selected: bool,
     state: &TuiState,
 ) {
-    let card = Block::default()
-        .borders(Borders::BOTTOM)
-        .style(if is_selected {
-            state.theme.card_focus
-        } else {
-            state.theme.frame
-        })
-        .padding(Padding::new(1, 1, 0, 1));
-    frame.render_widget(card.clone(), area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(area);
 
-    let inner = card.inner(area);
-    if inner.height < 3 {
+    draw_row_indicator(frame, cols[0], is_selected, state);
+
+    let secondary_height = secondary_panel_height(ayah, state);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(secondary_height),
+        ])
+        .split(cols[1]);
+
+    frame.render_widget(
+        Paragraph::new(build_row_header(ayah, is_selected, state))
+            .style(state.theme.frame)
+            .wrap(Wrap { trim: true }),
+        rows[0],
+    );
+
+    let arabic_text = padded_arabic_text(
+        &format_arabic(&ayah.arabic_text, Some(rows[1].width.saturating_sub(1))),
+        rows[1].height,
+    );
+    frame.render_widget(
+        Paragraph::new(arabic_text)
+            .style(state.theme.strong)
+            .alignment(Alignment::Right)
+            .wrap(Wrap { trim: true }),
+        rows[1],
+    );
+
+    if secondary_height > 0 {
+        frame.render_widget(
+            Paragraph::new(build_secondary_lines(ayah, state))
+                .style(state.theme.frame)
+                .wrap(Wrap { trim: true }),
+            rows[2],
+        );
+    }
+}
+
+fn draw_ayah_row_compact(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    ayah: &Ayah,
+    is_selected: bool,
+    state: &TuiState,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(secondary_panel_height(ayah, state)),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(build_row_header(ayah, is_selected, state))
+            .style(state.theme.frame)
+            .wrap(Wrap { trim: true }),
+        rows[0],
+    );
+
+    let arabic_text = padded_arabic_text(
+        &format_arabic(&ayah.arabic_text, Some(rows[1].width.saturating_sub(1))),
+        rows[1].height,
+    );
+    frame.render_widget(
+        Paragraph::new(arabic_text)
+            .style(state.theme.strong)
+            .alignment(Alignment::Right)
+            .wrap(Wrap { trim: true }),
+        rows[1],
+    );
+
+    if secondary_panel_height(ayah, state) > 0 {
+        frame.render_widget(
+            Paragraph::new(build_secondary_lines(ayah, state))
+                .style(state.theme.frame)
+                .wrap(Wrap { trim: true }),
+            rows[2],
+        );
+    }
+}
+
+fn draw_row_indicator(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    is_selected: bool,
+    state: &TuiState,
+) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(inner);
+    let text = std::iter::repeat(if is_selected { "|" } else { " " })
+        .take(area.height as usize)
+        .collect::<Vec<_>>()
+        .join("\n");
+    frame.render_widget(
+        Paragraph::new(text).style(if is_selected {
+            state.theme.accent
+        } else {
+            state.theme.frame
+        }),
+        area,
+    );
+}
 
-    let tools = Line::from(vec![
+fn build_row_header(ayah: &Ayah, is_selected: bool, state: &TuiState) -> Line<'static> {
+    Line::from(vec![
         Span::styled(
-            format!("[{}]", ayah.ayah_no),
+            format!(" {}:{} ", ayah.surah_no, ayah.ayah_no),
             if is_selected {
                 state.theme.chip
             } else {
                 state.theme.muted
             },
         ),
-        Span::raw("  "),
-        Span::styled("[play] [next]", state.theme.muted),
-    ]);
-    frame.render_widget(Paragraph::new(tools).style(state.theme.frame), rows[0]);
+        Span::raw(" "),
+        Span::styled(
+            if ayah.audio_url.is_some() {
+                "audio siap"
+            } else {
+                "tanpa audio"
+            },
+            state.theme.muted,
+        ),
+    ])
+}
 
-    let content_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(2), Constraint::Min(1), Constraint::Min(1)])
-        .split(rows[1]);
-
-    let arabic_text = format_arabic(&ayah.arabic_text, Some(content_layout[0].width));
-    frame.render_widget(
-        Paragraph::new(format!("\n{}\n", arabic_text))
-            .style(state.theme.strong.add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Right)
-            .wrap(Wrap { trim: true }),
-        content_layout[0],
-    );
-
-    if let Some(translit) = ayah.transliteration.as_deref() {
-        frame.render_widget(
-            Paragraph::new(format!("\n{}", translit))
-                .style(state.theme.muted)
-                .wrap(Wrap { trim: true }),
-            content_layout[1],
-        );
+fn secondary_panel_height(ayah: &Ayah, state: &TuiState) -> u16 {
+    let mut lines = 0;
+    if ayah.transliteration.as_deref().is_some() {
+        lines += 1;
     }
-
     if state.show_translation {
-        frame.render_widget(
-            Paragraph::new(format!("\n{}", ayah.translation.as_deref().unwrap_or("-")))
-                .style(state.theme.frame)
-                .wrap(Wrap { trim: true }),
-            content_layout[2],
-        );
+        lines += 1;
     }
+    lines
+}
+
+fn build_secondary_lines(ayah: &Ayah, state: &TuiState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(translit) = ayah.transliteration.as_deref() {
+        lines.push(Line::from(Span::styled(
+            translit.to_string(),
+            state.theme.muted,
+        )));
+    }
+    if state.show_translation {
+        lines.push(Line::from(Span::styled(
+            ayah.translation.as_deref().unwrap_or("-").to_string(),
+            state.theme.frame,
+        )));
+    }
+    lines
 }
 
 pub(super) fn filter_surah_indices(surahs: &[SurahMeta], query: &str) -> Vec<usize> {
@@ -598,54 +866,108 @@ fn compute_visible_window(selected: usize, total: usize, visible: usize) -> Visi
 }
 
 fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
-    let focus_label = if state.focus == PaneFocus::SurahCards {
-        "SIDEBAR"
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .style(state.theme.panel)
+        .border_style(state.theme.frame)
+        .padding(Padding::new(1, 1, 0, 0));
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let rows = if inner.height > 1 {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(inner)
     } else {
-        "READER"
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1)])
+            .split(inner)
     };
 
-    let line = Line::from(vec![
-        Span::styled("Fokus ", state.theme.muted),
-        Span::styled(format!(" {} ", focus_label), state.theme.chip),
-        Span::raw(" | "),
-        Span::styled(&state.status, state.theme.frame),
-        Span::raw(" | "),
-        Span::styled(
-            "Ctrl+K actions | / search | Tab pindah fokus | q keluar",
-            state.theme.muted,
-        ),
-    ]);
-
-    let footer = Paragraph::new(line).style(state.theme.frame).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .padding(Padding::new(2, 2, 0, 0))
-            .style(state.theme.panel)
-            .border_style(state.theme.frame),
+    let ratio = if state.ayahs.is_empty() {
+        0.0
+    } else {
+        (state.selected_ayah_idx.saturating_add(1) as f64 / state.ayahs.len() as f64)
+            .clamp(0.0, 1.0)
+    };
+    frame.render_widget(
+        Gauge::default()
+            .ratio(ratio)
+            .label(format!(
+                "Ayat {:>3} / {:>3}",
+                state.selected_ayah_idx.saturating_add(1),
+                state.ayahs.len()
+            ))
+            .style(state.theme.card)
+            .gauge_style(state.theme.accent)
+            .use_unicode(true),
+        rows[0],
     );
-    frame.render_widget(footer, area);
+
+    if rows.len() > 1 {
+        let audio_badge = if let Some(player) = &state.player {
+            if player.is_paused() { "PAUSE" } else { "PLAY" }
+        } else {
+            "STOP"
+        };
+        let controls = pad_line_end(
+            Line::from(vec![
+                Span::styled(format!(" {} ", audio_badge), state.theme.chip),
+                Span::raw(" "),
+                Span::styled(state.status.clone(), state.theme.frame),
+                Span::raw("  "),
+                Span::styled(
+                    "Space play  [/] prev-next  s stop  r repeat  ,/. speed  b bookmarks  f save  u unsave  Shift+Q qari",
+                    state.theme.muted,
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "Ctrl+B surat  / search  Ctrl+K actions  F1 help  q quit",
+                    state.theme.accent,
+                ),
+            ]),
+            rows[1].width,
+        );
+        frame.render_widget(Paragraph::new(controls).style(state.theme.frame), rows[1]);
+    }
 }
 
 fn draw_palette_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
-    let area = centered_rect(frame.area(), 70, 55);
+    let area = centered_rect(frame.area(), 74, 58);
     frame.render_widget(Clear, area);
 
-    let chunks = Layout::default()
+    let block = Block::default()
+        .title("Actions")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(state.theme.panel)
+        .border_style(state.theme.accent)
+        .padding(Padding::new(1, 1, 0, 0));
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(area);
+        .split(inner);
 
-    let input = Paragraph::new(format!("> {}", state.palette_input))
-        .style(state.theme.strong)
-        .block(
-            Block::default()
-                .title("Command Palette (Ctrl+K)")
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .style(state.theme.panel),
-        );
-    frame.render_widget(input, chunks[0]);
+    frame.render_widget(
+        Paragraph::new(format!("> {}", state.palette_input))
+            .style(state.theme.strong)
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(state.theme.frame),
+            ),
+        sections[0],
+    );
 
     let items = state.filtered_palette();
     let list_items: Vec<ListItem<'_>> = items
@@ -653,154 +975,197 @@ fn draw_palette_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
         .enumerate()
         .map(|(idx, item)| {
             if idx == state.palette_selected_idx {
-                ListItem::new(item.label.to_string()).style(state.theme.accent)
+                ListItem::new(Line::from(vec![
+                    Span::styled("> ", state.theme.accent),
+                    Span::styled(item.label, state.theme.strong),
+                ]))
             } else {
-                ListItem::new(item.label)
+                ListItem::new(Line::from(vec![
+                    Span::styled("  ", state.theme.muted),
+                    Span::styled(item.label, state.theme.frame),
+                ]))
             }
         })
         .collect();
-
-    let list = List::new(list_items).block(
-        Block::default()
-            .border_type(BorderType::Rounded)
-            .borders(Borders::ALL)
-            .style(state.theme.panel),
+    frame.render_widget(
+        List::new(list_items).block(Block::default().style(state.theme.panel)),
+        sections[1],
     );
-    frame.render_widget(list, chunks[1]);
 }
 
 fn draw_search_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
-    let area = centered_rect(frame.area(), 72, 60);
+    let area = centered_rect(frame.area(), 76, 62);
     frame.render_widget(Clear, area);
 
-    let chunks = Layout::default()
+    let block = Block::default()
+        .title("Search Ayah")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(state.theme.panel)
+        .border_style(state.theme.accent)
+        .padding(Padding::new(1, 1, 0, 0));
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(area);
+        .split(inner);
 
-    let input = Paragraph::new(format!("/ {}", state.search_input))
-        .style(state.theme.strong)
-        .block(
-            Block::default()
-                .title("Inline Search (Enter untuk cari/lompat)")
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .style(state.theme.panel),
-        );
-    frame.render_widget(input, chunks[0]);
+    frame.render_widget(
+        Paragraph::new(format!("/ {}", state.search_input))
+            .style(state.theme.strong)
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(state.theme.frame),
+            ),
+        sections[0],
+    );
 
     let items: Vec<ListItem<'_>> = if state.search_results.is_empty() {
-        vec![ListItem::new("Belum ada hasil. Tekan Enter untuk cari.")]
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "Belum ada hasil. Tekan Enter untuk mencari.",
+            state.theme.muted,
+        )]))]
     } else {
         state
             .search_results
             .iter()
             .enumerate()
             .map(|(idx, hit)| {
-                let line = format!(
-                    "{}:{} {}",
-                    hit.surah_no,
-                    hit.ayah_no,
-                    format_arabic(&hit.snippet, None)
-                );
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("{}:{} ", hit.surah_no, hit.ayah_no),
+                        state.theme.accent,
+                    ),
+                    Span::styled(hit.snippet.clone(), state.theme.frame),
+                ]);
                 if idx == state.selected_search_idx {
-                    ListItem::new(line).style(state.theme.accent)
+                    ListItem::new(line).style(state.theme.card_focus)
                 } else {
                     ListItem::new(line)
                 }
             })
             .collect()
     };
-
-    let results = List::new(items).block(
-        Block::default()
-            .border_type(BorderType::Rounded)
-            .borders(Borders::ALL)
-            .style(state.theme.panel),
+    frame.render_widget(
+        List::new(items).block(Block::default().style(state.theme.panel)),
+        sections[1],
     );
-    frame.render_widget(results, chunks[1]);
 }
 
 fn draw_bookmark_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
-    let area = centered_rect(frame.area(), 64, 60);
+    let area = centered_rect(frame.area(), 70, 58);
     frame.render_widget(Clear, area);
 
+    let block = Block::default()
+        .title("Bookmarks")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(state.theme.panel)
+        .border_style(state.theme.accent)
+        .padding(Padding::new(1, 1, 0, 0));
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
     let items: Vec<ListItem<'_>> = if state.bookmarks.is_empty() {
-        vec![ListItem::new("Belum ada bookmark")]
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "Belum ada bookmark.",
+            state.theme.muted,
+        )]))]
     } else {
         state
             .bookmarks
             .iter()
             .enumerate()
             .map(|(idx, b)| {
-                let line = format!(
-                    "#{}  {}:{}  {}",
-                    b.id,
-                    b.surah_no,
-                    b.ayah_no,
-                    b.note.as_deref().unwrap_or("-")
-                );
+                let line = Line::from(vec![
+                    Span::styled(format!("#{} ", b.id), state.theme.accent),
+                    Span::styled(format!("{}:{} ", b.surah_no, b.ayah_no), state.theme.strong),
+                    Span::styled(
+                        b.note.as_deref().unwrap_or("-").to_string(),
+                        state.theme.frame,
+                    ),
+                ]);
                 if idx == state.selected_bookmark_idx {
-                    ListItem::new(line).style(state.theme.accent)
+                    ListItem::new(line).style(state.theme.card_focus)
                 } else {
                     ListItem::new(line)
                 }
             })
             .collect()
     };
-
-    let list = List::new(items).block(
-        Block::default()
-            .title("Bookmarks (Enter untuk lompat)")
-            .border_type(BorderType::Rounded)
-            .borders(Borders::ALL)
-            .style(state.theme.panel),
+    frame.render_widget(
+        List::new(items).block(Block::default().style(state.theme.panel)),
+        sections[0],
     );
-    frame.render_widget(list, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", state.theme.chip),
+            Span::raw(" lompat  "),
+            Span::styled("d/Delete", state.theme.chip),
+            Span::raw(" hapus  "),
+            Span::styled("Esc", state.theme.chip),
+            Span::raw(" tutup"),
+        ]))
+        .style(state.theme.frame),
+        sections[1],
+    );
 }
 
 fn draw_help_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
-    let area = centered_rect(frame.area(), 68, 56);
+    let area = centered_rect(frame.area(), 72, 64);
     frame.render_widget(Clear, area);
 
-    let text = vec![
-        "Modern Keymap",
+    let text = [
+        "Reader-first keymap",
         "",
-        "Ctrl+K   : Command palette",
-        "Tab      : Ganti fokus Sidebar <-> Reader",
-        "j / k    : Navigasi fokus aktif",
-        "Ketik    : Live filter surat (saat fokus Sidebar)",
-        "Backspace: Hapus karakter filter surat",
-        "Esc      : Clear filter surat (saat fokus Sidebar)",
-        "Enter    : Buka surat dari card terpilih",
-        "n / p    : Surah berikutnya / sebelumnya",
-        "/        : Inline search",
-        "f        : Tambah bookmark",
-        "Ctrl+B   : Tampil/sembunyi sidebar",
-        "Space    : Play/Pause audio",
-        "] / [    : Next / Prev ayat audio",
-        "s        : Stop playback",
-        "r        : Repeat ayat aktif",
-        "Q        : Ganti qari (cycle)",
-        ", / .    : Turun/naik speed",
-        "F1       : Buka/tutup help",
-        "q        : Keluar",
+        "j / k      : Pindah ayat aktif",
+        "n / p      : Surah berikutnya / sebelumnya",
+        "Ctrl+B     : Tampil/sembunyi panel surat",
+        "Tab        : Pindah fokus panel surat <-> panel baca",
+        "Ketik      : Filter surat saat panel surat fokus",
+        "Enter      : Buka surat dari panel surat",
+        "/          : Search ayat",
+        "b          : Buka daftar bookmark",
+        "f          : Tambah bookmark",
+        "u          : Unbookmark ayat aktif",
+        "Enter      : Lompat ke bookmark saat daftar bookmark terbuka",
+        "d/Delete   : Hapus bookmark terpilih saat daftar bookmark terbuka",
+        "Ctrl+K     : Actions / command palette",
+        "Space      : Play / pause audio dari ayat aktif",
+        "[ / ]      : Ayat audio sebelumnya / berikutnya",
+        "s          : Stop audio",
+        "r          : Ulangi ayat aktif",
+        ", / .      : Turunkan / naikkan speed",
+        "Shift+Q    : Ganti qari",
+        "F1 / Esc   : Tutup help atau overlay",
+        "q          : Keluar aplikasi",
         "",
-        "Esc untuk kembali.",
+        "Mode baca penuh adalah default. Panel surat dibuka saat dibutuhkan.",
     ]
     .join("\n");
 
-    let block = Paragraph::new(text)
-        .style(state.theme.frame)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .title("Help")
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .style(state.theme.panel),
-        );
-    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(state.theme.frame)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Help")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .style(state.theme.panel)
+                    .border_style(state.theme.accent)
+                    .padding(Padding::new(1, 1, 0, 0)),
+            ),
+        area,
+    );
 }
 
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -825,21 +1190,6 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
     horizontal[1]
 }
 
-fn inset_rect(area: Rect, margin_x: u16, margin_y: u16) -> Rect {
-    let clamped_x = margin_x.min(area.width.saturating_sub(1) / 2);
-    let clamped_y = margin_y.min(area.height.saturating_sub(1) / 2);
-    Rect::new(
-        area.x.saturating_add(clamped_x),
-        area.y.saturating_add(clamped_y),
-        area.width
-            .saturating_sub(clamped_x.saturating_mul(2))
-            .max(1),
-        area.height
-            .saturating_sub(clamped_y.saturating_mul(2))
-            .max(1),
-    )
-}
-
 pub(super) fn frame_size_hint(terminal: &Terminal<CrosstermBackend<Stdout>>) -> (u16, u16) {
     terminal
         .size()
@@ -849,10 +1199,18 @@ pub(super) fn frame_size_hint(terminal: &Terminal<CrosstermBackend<Stdout>>) -> 
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, env};
 
-    use super::{VisibleWindow, compute_visible_window, filter_surah_indices};
-    use crate::domain::SurahMeta;
+    use super::{
+        ReaderDensity, TuiState, VisibleWindow, ayah_row_height, can_show_sidebar_in_frame,
+        draw_ui,
+        compute_visible_window, filter_surah_indices, pad_line_end, padded_arabic_text,
+        reader_density,
+    };
+    use crate::{audio::AudioCache, domain::{Ayah, SurahMeta}};
+    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
 
     fn mk_surah(no: u16, name_id: &str) -> SurahMeta {
         SurahMeta {
@@ -863,6 +1221,49 @@ mod tests {
             audio_full: None,
             audio_full_urls: BTreeMap::new(),
         }
+    }
+
+    fn mk_ayah(no: u16, arabic_text: &str, translation: &str) -> Ayah {
+        Ayah {
+            surah_no: 1,
+            ayah_no: no,
+            arabic_text: arabic_text.to_string(),
+            transliteration: Some(format!("translit-{no}")),
+            translation: Some(translation.to_string()),
+            audio_url: Some(format!("https://example.test/{no}.mp3")),
+            audio_urls: BTreeMap::new(),
+        }
+    }
+
+    fn mk_state_for_full_render() -> TuiState {
+        let cache_dir = env::temp_dir().join("tada-rust-render-regression-tests");
+        let mut state = TuiState::new(
+            vec![
+                mk_surah(1, "LONGSURAHMARKER-ALPHA-BETA-GAMMA"),
+                mk_surah(2, "A"),
+            ],
+            "dark",
+            true,
+            true,
+            AudioCache::new(cache_dir, false, 1).expect("audio cache"),
+            "01".to_string(),
+        );
+        state.ayahs = vec![
+            mk_ayah(1, "الٓمٓ", "translation-1"),
+            mk_ayah(2, "اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ", "translation-2"),
+        ];
+        state.selected_ayah_idx = 0;
+        state
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -890,6 +1291,113 @@ mod tests {
         assert!(start < end);
         assert!(end <= 20);
         assert!(end - start <= 5);
+    }
+
+    #[test]
+    fn reader_density_switches_for_roomy_layouts() {
+        assert_eq!(
+            reader_density(Rect::new(0, 0, 120, 32)),
+            ReaderDensity::Wide
+        );
+        assert_eq!(
+            reader_density(Rect::new(0, 0, 90, 24)),
+            ReaderDensity::Compact
+        );
+    }
+
+    #[test]
+    fn ayah_row_height_grows_when_translation_is_enabled() {
+        assert!(
+            ayah_row_height(ReaderDensity::Wide, true)
+                > ayah_row_height(ReaderDensity::Wide, false)
+        );
+    }
+
+    #[test]
+    fn ayah_row_height_grows_in_compact_mode() {
+        assert!(
+            ayah_row_height(ReaderDensity::Compact, true)
+                > ayah_row_height(ReaderDensity::Wide, true)
+        );
+    }
+
+    #[test]
+    fn sidebar_visibility_uses_full_frame_constraints() {
+        assert!(can_show_sidebar_in_frame(Rect::new(0, 0, 140, 35)));
+        assert!(!can_show_sidebar_in_frame(Rect::new(0, 0, 131, 35)));
+        assert!(!can_show_sidebar_in_frame(Rect::new(0, 0, 140, 33)));
+    }
+
+    #[test]
+    fn padded_arabic_text_adds_single_top_padding() {
+        let padded = padded_arabic_text("ayat", 5);
+        let lines: Vec<_> = padded.split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.first(), Some(&""));
+        assert_eq!(lines.get(1), Some(&"ayat"));
+    }
+
+    #[test]
+    fn pad_line_end_fills_remaining_width() {
+        let padded = pad_line_end(Line::from("abc"), 6);
+        assert_eq!(padded.width(), 6);
+    }
+
+    #[test]
+    fn draw_ui_clears_old_header_and_footer_text_on_redraw() {
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = mk_state_for_full_render();
+        state.status =
+            "STATUSMARKER alpha beta gamma delta epsilon zeta eta theta".to_string();
+
+        terminal
+            .draw(|frame| draw_ui(frame, &state))
+            .expect("draw long state");
+        let first = buffer_text(&terminal);
+        assert!(first.contains("LONGSURAHMARKER"));
+        assert!(first.contains("STATUSMARKER"));
+
+        state.selected_surah_idx = 1;
+        state.surah_cursor_idx = 1;
+        state.status = "ok".to_string();
+        terminal
+            .draw(|frame| draw_ui(frame, &state))
+            .expect("draw short state");
+
+        let second = buffer_text(&terminal);
+        assert!(second.contains("SURAH A"));
+        assert!(second.contains(" ok "));
+        assert!(!second.contains("LONGSURAHMARKER"));
+        assert!(!second.contains("STATUSMARKER"));
+    }
+
+    #[test]
+    fn draw_ui_keeps_ayah_row_anchor_stable_across_redraws() {
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = mk_state_for_full_render();
+
+        terminal
+            .draw(|frame| draw_ui(frame, &state))
+            .expect("draw initial");
+        let first = buffer_text(&terminal);
+        let first_row = first
+            .lines()
+            .position(|line| line.contains("1:1"))
+            .expect("first ayah row marker");
+
+        state.status = "Audio berhenti".to_string();
+        terminal
+            .draw(|frame| draw_ui(frame, &state))
+            .expect("draw second");
+        let second = buffer_text(&terminal);
+        let second_row = second
+            .lines()
+            .position(|line| line.contains("1:1"))
+            .expect("second ayah row marker");
+
+        assert_eq!(first_row, second_row);
     }
 
     #[test]

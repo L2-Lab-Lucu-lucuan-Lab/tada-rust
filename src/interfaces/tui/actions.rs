@@ -16,19 +16,37 @@ where
     match intent {
         Intent::Quit => return Ok(true),
         Intent::NextAyah => {
+            let canceled_pause = stop_paused_playback_for_navigation(state);
             if state.selected_ayah_idx + 1 < state.ayahs.len() {
                 state.selected_ayah_idx += 1;
                 if let Some(ayah) = state.current_ayah() {
                     state_repo.set_progress(ayah_ref_from_raw(ayah.surah_no, ayah.ayah_no)?)?;
+                    if canceled_pause {
+                        state.status = format!(
+                            "Audio pause dibatalkan. Ayat aktif {}:{}",
+                            ayah.surah_no, ayah.ayah_no
+                        );
+                    }
                 }
+            } else if canceled_pause {
+                state.status = "Audio pause dibatalkan.".to_string();
             }
         }
         Intent::PrevAyah => {
+            let canceled_pause = stop_paused_playback_for_navigation(state);
             if state.selected_ayah_idx > 0 {
                 state.selected_ayah_idx -= 1;
                 if let Some(ayah) = state.current_ayah() {
                     state_repo.set_progress(ayah_ref_from_raw(ayah.surah_no, ayah.ayah_no)?)?;
+                    if canceled_pause {
+                        state.status = format!(
+                            "Audio pause dibatalkan. Ayat aktif {}:{}",
+                            ayah.surah_no, ayah.ayah_no
+                        );
+                    }
                 }
+            } else if canceled_pause {
+                state.status = "Audio pause dibatalkan.".to_string();
             }
         }
         Intent::NextSurah => {
@@ -54,12 +72,26 @@ where
         }
         Intent::AudioNext => {
             if let Some(player) = &mut state.player {
-                let _ = player.advance()?;
+                if player.advance()? {
+                    if let Some(ayah) = player.current_ayah() {
+                        state.status = format!(
+                            "PLAY {}:{} | qari {}",
+                            ayah.surah_no, ayah.ayah_no, state.active_qari
+                        );
+                    }
+                }
             }
         }
         Intent::AudioPrev => {
             if let Some(player) = &mut state.player {
-                let _ = player.prev()?;
+                if player.prev()? {
+                    if let Some(ayah) = player.current_ayah() {
+                        state.status = format!(
+                            "PLAY {}:{} | qari {}",
+                            ayah.surah_no, ayah.ayah_no, state.active_qari
+                        );
+                    }
+                }
             }
         }
         Intent::AudioStop => {
@@ -98,6 +130,8 @@ where
         Intent::FocusNextPane => {
             if state.sidebar_collapsed {
                 state.focus = PaneFocus::AyahReader;
+                state.status =
+                    "Panel surat tersembunyi. Tekan Ctrl+B untuk membuka daftar surat.".to_string();
             } else {
                 state.focus = if state.focus == PaneFocus::SurahCards {
                     PaneFocus::AyahReader
@@ -106,11 +140,11 @@ where
                 };
                 state.status = match state.focus {
                     PaneFocus::SurahCards => {
-                        "Fokus: daftar surat. Ketik untuk filter, j/k navigasi, Enter membuka."
+                        "Fokus panel surat. Ketik untuk filter, j/k navigasi, Enter membuka."
                             .to_string()
                     }
                     PaneFocus::AyahReader => {
-                        "Fokus: panel ayat. Gunakan j/k untuk pindah ayat.".to_string()
+                        "Fokus panel baca. Gunakan j/k untuk pindah ayat.".to_string()
                     }
                 };
             }
@@ -175,11 +209,22 @@ where
             state.status = "Filter surat dibersihkan.".to_string();
         }
         Intent::ToggleSidebar => {
-            state.sidebar_collapsed = !state.sidebar_collapsed;
             if state.sidebar_collapsed {
-                state.focus = PaneFocus::AyahReader;
+                if can_show_sidebar_in_frame(Rect::new(0, 0, terminal_width, terminal_height)) {
+                    state.sidebar_collapsed = false;
+                    state.focus = PaneFocus::SurahCards;
+                    state.status =
+                        "Panel surat dibuka. Ketik untuk filter, Enter untuk membuka surat."
+                            .to_string();
+                } else {
+                    state.focus = PaneFocus::AyahReader;
+                    state.status = "Ukuran terminal terlalu kecil untuk panel surat.".to_string();
+                }
             } else {
-                state.focus = PaneFocus::SurahCards;
+                state.sidebar_collapsed = true;
+                state.focus = PaneFocus::AyahReader;
+                state.status =
+                    "Mode baca penuh aktif. Tekan Ctrl+B untuk membuka panel surat.".to_string();
             }
         }
         Intent::ToggleHelp => {
@@ -214,6 +259,9 @@ where
                     ayah.ayah_no
                 );
             }
+        }
+        Intent::RemoveCurrentAyahBookmarks => {
+            remove_current_ayah_bookmarks(state_repo, state)?;
         }
         Intent::CloseOverlay => {
             state.mode = UiMode::Reading;
@@ -289,6 +337,9 @@ where
                 state.search_input.push(c);
             }
         }
+        Intent::BookmarkDelete => {
+            delete_selected_bookmark(state_repo, state)?;
+        }
         Intent::BookmarkMoveUp => {
             state.selected_bookmark_idx = state.selected_bookmark_idx.saturating_sub(1);
         }
@@ -311,15 +362,88 @@ where
         }
     }
 
-    if terminal_width < 120 || terminal_height < 28 {
+    if !can_show_sidebar_in_frame(Rect::new(0, 0, terminal_width, terminal_height)) {
         state.sidebar_collapsed = true;
         state.focus = PaneFocus::AyahReader;
-    } else if state.sidebar_collapsed && terminal_width >= 130 && terminal_height >= 32 {
-        state.sidebar_collapsed = false;
-        state.focus = PaneFocus::SurahCards;
     }
 
     Ok(false)
+}
+
+fn stop_paused_playback_for_navigation(state: &mut TuiState) -> bool {
+    let paused = state
+        .player
+        .as_ref()
+        .is_some_and(|player| player.is_paused());
+    if paused {
+        state.stop_playback();
+    }
+    paused
+}
+
+fn remove_current_ayah_bookmarks<S>(state_repo: &S, state: &mut TuiState) -> Result<()>
+where
+    S: ProgressRepository + BookmarkRepository,
+{
+    let Some(ayah) = state.current_ayah() else {
+        state.status = "Tidak ada ayat aktif untuk unbookmark.".to_string();
+        return Ok(());
+    };
+    let surah_no = ayah.surah_no;
+    let ayah_no = ayah.ayah_no;
+
+    let matches: Vec<_> = state_repo
+        .list_bookmarks()?
+        .into_iter()
+        .filter(|bookmark| bookmark.surah_no == surah_no && bookmark.ayah_no == ayah_no)
+        .collect();
+
+    if matches.is_empty() {
+        state.status = format!(
+            "Belum ada bookmark pada ayat aktif {}:{}.",
+            surah_no, ayah_no
+        );
+        return Ok(());
+    }
+
+    let removed = matches.len();
+    for bookmark in matches {
+        state_repo.remove_bookmark(BookmarkId::new(bookmark.id)?)?;
+    }
+
+    if state.mode == UiMode::BookmarkOverlay {
+        state.bookmarks = state_repo.list_bookmarks()?;
+        state.selected_bookmark_idx = state
+            .selected_bookmark_idx
+            .min(state.bookmarks.len().saturating_sub(1));
+    }
+
+    state.status = format!(
+        "{} bookmark dihapus dari ayat {}:{}.",
+        removed, surah_no, ayah_no
+    );
+    Ok(())
+}
+
+fn delete_selected_bookmark<S>(state_repo: &S, state: &mut TuiState) -> Result<()>
+where
+    S: ProgressRepository + BookmarkRepository,
+{
+    let Some(bookmark) = state.bookmarks.get(state.selected_bookmark_idx).cloned() else {
+        state.status = "Belum ada bookmark untuk dihapus.".to_string();
+        return Ok(());
+    };
+
+    state_repo.remove_bookmark(BookmarkId::new(bookmark.id)?)?;
+    state.bookmarks = state_repo.list_bookmarks()?;
+    state.selected_bookmark_idx = state
+        .selected_bookmark_idx
+        .min(state.bookmarks.len().saturating_sub(1));
+    state.status = format!(
+        "Bookmark #{} dihapus ({}:{}).",
+        bookmark.id, bookmark.surah_no, bookmark.ayah_no
+    );
+    Ok(())
 }
 
 fn execute_palette_action<R, S>(
@@ -458,7 +582,7 @@ where
         if let Some(ayah) = player.current_ayah() {
             state.selected_ayah_idx = ayah.ayah_no.saturating_sub(1) as usize;
             state.status = format!(
-                "Memutar {}:{} (qari {})",
+                "PLAY {}:{} | qari {}",
                 ayah.surah_no, ayah.ayah_no, state.active_qari
             );
             state_repo.set_progress(ayah_ref_from_raw(ayah.surah_no, ayah.ayah_no)?)?;
@@ -467,7 +591,7 @@ where
 
     if finished {
         state.player = None;
-        state.status = "Playback selesai".to_string();
+        state.status = "Audio selesai".to_string();
     }
 
     Ok(())

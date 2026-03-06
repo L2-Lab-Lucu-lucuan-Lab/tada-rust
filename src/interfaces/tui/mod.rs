@@ -19,8 +19,8 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use crate::application::ports::{BookmarkRepository, ProgressRepository, QuranReadRepository};
 use crate::audio::{AudioCache, AudioPlayer, PlayerTick, qari_name};
 use crate::domain::{
-    Ayah, AyahNumber, AyahRef, Bookmark, LanguageTag, SearchHit, SearchLimit, SurahMeta,
-    SurahNumber,
+    Ayah, AyahNumber, AyahRef, Bookmark, BookmarkId, LanguageTag, SearchHit, SearchLimit,
+    SurahMeta, SurahNumber,
 };
 
 mod actions;
@@ -29,7 +29,7 @@ mod render;
 
 use actions::{apply_intent, ayah_ref_from_raw, sync_audio_tick};
 use input::map_key_to_intent;
-use render::{draw_ui, filter_surah_indices, frame_size_hint};
+use render::{can_show_sidebar_in_frame, draw_ui, filter_surah_indices, frame_size_hint};
 
 #[derive(Debug, Clone)]
 pub struct TuiLaunchOptions {
@@ -187,6 +187,7 @@ enum Intent {
     OpenSearch,
     OpenBookmarks,
     AddBookmark,
+    RemoveCurrentAyahBookmarks,
     CloseOverlay,
     PaletteMoveUp,
     PaletteMoveDown,
@@ -198,6 +199,7 @@ enum Intent {
     SearchBackspace,
     SearchSubmit,
     SearchType(char),
+    BookmarkDelete,
     BookmarkMoveUp,
     BookmarkMoveDown,
     BookmarkJump,
@@ -315,62 +317,62 @@ impl ThemeStyles {
 
         if resolved == "light" {
             Self {
-                app_bg: Style::default().bg(Color::Rgb(245, 247, 255)),
-                frame: Style::default().fg(Color::Rgb(26, 35, 48)),
-                muted: Style::default().fg(Color::Rgb(82, 95, 115)),
+                app_bg: Style::default().bg(Color::Rgb(248, 241, 232)),
+                frame: Style::default().fg(Color::Rgb(63, 45, 31)),
+                muted: Style::default().fg(Color::Rgb(121, 96, 75)),
                 accent: Style::default()
-                    .fg(Color::Rgb(0, 149, 120))
+                    .fg(Color::Rgb(0, 139, 178))
                     .add_modifier(Modifier::BOLD),
                 strong: Style::default()
-                    .fg(Color::Rgb(20, 28, 40))
+                    .fg(Color::Rgb(34, 24, 16))
                     .add_modifier(Modifier::BOLD),
                 panel: Style::default()
-                    .fg(Color::Rgb(22, 32, 48))
-                    .bg(Color::Rgb(238, 244, 255)),
+                    .fg(Color::Rgb(58, 42, 30))
+                    .bg(Color::Rgb(241, 231, 220)),
                 card: Style::default()
-                    .fg(Color::Rgb(22, 32, 48))
-                    .bg(Color::Rgb(228, 236, 250)),
+                    .fg(Color::Rgb(58, 42, 30))
+                    .bg(Color::Rgb(246, 238, 228)),
                 card_active: Style::default()
-                    .fg(Color::Rgb(11, 22, 36))
-                    .bg(Color::Rgb(213, 243, 233))
+                    .fg(Color::Rgb(32, 24, 18))
+                    .bg(Color::Rgb(232, 224, 213))
                     .add_modifier(Modifier::BOLD),
                 card_focus: Style::default()
-                    .fg(Color::Rgb(16, 31, 49))
-                    .bg(Color::Rgb(200, 230, 248))
+                    .fg(Color::Rgb(28, 31, 36))
+                    .bg(Color::Rgb(213, 232, 238))
                     .add_modifier(Modifier::BOLD),
                 chip: Style::default()
                     .fg(Color::Rgb(255, 255, 255))
-                    .bg(Color::Rgb(0, 149, 120))
+                    .bg(Color::Rgb(0, 139, 178))
                     .add_modifier(Modifier::BOLD),
             }
         } else {
             Self {
-                app_bg: Style::default().bg(Color::Rgb(6, 9, 23)),
-                frame: Style::default().fg(Color::Rgb(206, 219, 242)),
-                muted: Style::default().fg(Color::Rgb(124, 141, 170)),
+                app_bg: Style::default().bg(Color::Rgb(18, 8, 4)),
+                frame: Style::default().fg(Color::Rgb(206, 187, 166)),
+                muted: Style::default().fg(Color::Rgb(128, 103, 84)),
                 accent: Style::default()
-                    .fg(Color::Rgb(32, 215, 170))
+                    .fg(Color::Rgb(48, 205, 236))
                     .add_modifier(Modifier::BOLD),
                 strong: Style::default()
-                    .fg(Color::Rgb(244, 249, 255))
+                    .fg(Color::Rgb(242, 232, 221))
                     .add_modifier(Modifier::BOLD),
                 panel: Style::default()
-                    .fg(Color::Rgb(206, 219, 242))
-                    .bg(Color::Rgb(10, 16, 36)),
+                    .fg(Color::Rgb(210, 191, 170))
+                    .bg(Color::Rgb(28, 12, 4)),
                 card: Style::default()
-                    .fg(Color::Rgb(206, 219, 242))
-                    .bg(Color::Rgb(13, 22, 46)),
+                    .fg(Color::Rgb(214, 199, 184))
+                    .bg(Color::Rgb(24, 10, 5)),
                 card_active: Style::default()
-                    .fg(Color::Rgb(236, 252, 247))
-                    .bg(Color::Rgb(18, 43, 62))
+                    .fg(Color::Rgb(243, 236, 228))
+                    .bg(Color::Rgb(38, 21, 13))
                     .add_modifier(Modifier::BOLD),
                 card_focus: Style::default()
-                    .fg(Color::Rgb(250, 255, 255))
-                    .bg(Color::Rgb(24, 50, 78))
+                    .fg(Color::Rgb(245, 251, 255))
+                    .bg(Color::Rgb(12, 47, 57))
                     .add_modifier(Modifier::BOLD),
                 chip: Style::default()
-                    .fg(Color::Rgb(8, 24, 28))
-                    .bg(Color::Rgb(32, 215, 170))
+                    .fg(Color::Rgb(8, 18, 22))
+                    .bg(Color::Rgb(48, 205, 236))
                     .add_modifier(Modifier::BOLD),
             }
         }
@@ -420,12 +422,11 @@ impl TuiState {
             selected_bookmark_idx: 0,
             search_results: Vec::new(),
             selected_search_idx: 0,
-            status:
-                "Tab fokus panel | j/k navigasi | Enter pilih surat | Space play/pause | / search"
-                    .to_string(),
+            status: "j/k navigasi ayat | Ctrl+B panel surat | Space play/pause | / search"
+                .to_string(),
             mode: UiMode::Reading,
-            sidebar_collapsed: false,
-            focus: PaneFocus::SurahCards,
+            sidebar_collapsed: true,
+            focus: PaneFocus::AyahReader,
             surah_cursor_idx: 0,
             surah_filter: String::new(),
             show_translation,
@@ -457,9 +458,9 @@ impl TuiState {
             .selected_ayah_idx
             .min(self.ayahs.len().saturating_sub(1));
         self.status = format!(
-            "Membaca {} ({})",
+            "Membaca {} [{} ayat]",
             self.current_surah().name_id,
-            surah_no.value()
+            self.current_surah().ayah_count
         );
         Ok(())
     }
@@ -506,9 +507,9 @@ impl TuiState {
         if let Some(player) = &mut self.player {
             player.toggle_pause();
             self.status = if player.is_paused() {
-                "Playback pause".to_string()
+                "Audio pause. j/k pindah ayat, Space lanjut.".to_string()
             } else {
-                "Playback lanjut".to_string()
+                "Audio lanjut".to_string()
             };
             return Ok(());
         }
@@ -528,7 +529,7 @@ impl TuiState {
         )?;
         if let Some(ayah) = player.current_ayah() {
             self.status = format!(
-                "Memutar {}:{} (qari {})",
+                "PLAY {}:{} | qari {}",
                 ayah.surah_no, ayah.ayah_no, self.active_qari
             );
             self.selected_ayah_idx = ayah.ayah_no.saturating_sub(1) as usize;
@@ -542,7 +543,7 @@ impl TuiState {
             player.stop();
         }
         self.player = None;
-        self.status = "Playback berhenti".to_string();
+        self.status = "Audio berhenti".to_string();
     }
 }
 
