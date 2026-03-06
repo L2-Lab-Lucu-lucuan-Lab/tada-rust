@@ -5,7 +5,7 @@ use ratatui::widgets::Padding;
 use unicode_bidi::BidiInfo;
 use unicode_normalization::UnicodeNormalization;
 
-fn format_arabic(text: &str) -> String {
+fn format_arabic(text: &str, max_width: Option<u16>) -> String {
     let mut reshaper = ArabicReshaper::new();
 
     if let Some(val) = reshaper.configuration.get_mut("delete_harakat") {
@@ -19,13 +19,32 @@ fn format_arabic(text: &str) -> String {
 
     let reshaped = reshaper.reshape(&normalized);
 
-    let bidi_info = BidiInfo::new(&reshaped, None);
-    if let Some(para) = bidi_info.paragraphs.get(0) {
-        let line = para.range.clone();
-        bidi_info.reorder_line(para, line).to_string()
+    let lines = if let Some(width) = max_width {
+        if width > 0 {
+            textwrap::wrap(&reshaped, width as usize)
+        } else {
+            vec![std::borrow::Cow::Borrowed(&reshaped[..])]
+        }
     } else {
-        reshaped
+        vec![std::borrow::Cow::Borrowed(&reshaped[..])]
+    };
+
+    let mut result = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+
+        let bidi_info = BidiInfo::new(line, Some(unicode_bidi::Level::rtl()));
+        if let Some(para) = bidi_info.paragraphs.get(0) {
+            let range = para.range.clone();
+            result.push_str(&bidi_info.reorder_line(para, range));
+        } else {
+            result.push_str(line);
+        }
     }
+
+    result
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,7 +243,10 @@ fn draw_surah_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
             Line::from(vec![
                 Span::styled(format!("{} ayat", surah.ayah_count), state.theme.muted),
                 Span::raw("  |  "),
-                Span::styled(format_arabic(&surah.name_ar), state.theme.accent),
+                Span::styled(
+                    format_arabic(&surah.name_ar, None),
+                    state.theme.accent.add_modifier(Modifier::BOLD),
+                ),
             ]),
             if is_selected {
                 Line::from(Span::styled("TERBUKA", state.theme.chip))
@@ -333,8 +355,8 @@ fn draw_surah_summary(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
     );
 
     frame.render_widget(
-        Paragraph::new(format_arabic(&surah.name_ar))
-            .style(state.theme.accent)
+        Paragraph::new(format_arabic(&surah.name_ar, None))
+            .style(state.theme.accent.add_modifier(Modifier::BOLD))
             .alignment(Alignment::Right),
         cols[1],
     );
@@ -442,12 +464,12 @@ fn draw_ayah_list(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) 
 }
 
 fn ayah_card_height(state: &TuiState, area: Rect) -> u16 {
-    let mut height = 6;
+    let mut height = 7;
     if state.show_translation {
-        height += 1;
+        height += 3;
     }
     if area.width < 92 {
-        height += 1;
+        height += 3;
     }
     height
 }
@@ -460,19 +482,13 @@ fn draw_ayah_card(
     state: &TuiState,
 ) {
     let card = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .borders(Borders::BOTTOM)
         .style(if is_selected {
             state.theme.card_focus
         } else {
-            state.theme.card
-        })
-        .border_style(if is_selected {
-            state.theme.accent
-        } else {
             state.theme.frame
         })
-        .padding(Padding::new(2, 2, 0, 0));
+        .padding(Padding::new(1, 1, 0, 1));
     frame.render_widget(card.clone(), area);
 
     let inner = card.inner(area);
@@ -499,59 +515,35 @@ fn draw_ayah_card(
     ]);
     frame.render_widget(Paragraph::new(tools).style(state.theme.frame), rows[0]);
 
-    if rows[1].width >= 90 {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
-            .split(rows[1]);
+    let content_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Min(1), Constraint::Min(1)])
+        .split(rows[1]);
 
-        let mut left_lines = Vec::new();
-        if let Some(translit) = ayah.transliteration.as_deref() {
-            left_lines.push(Line::from(Span::styled(translit, state.theme.muted)));
-        }
-        if state.show_translation {
-            left_lines.push(Line::from(""));
-            left_lines.push(Line::from(Span::styled(
-                ayah.translation.as_deref().unwrap_or("-"),
-                state.theme.frame,
-            )));
-        }
+    let arabic_text = format_arabic(&ayah.arabic_text, Some(content_layout[0].width));
+    frame.render_widget(
+        Paragraph::new(format!("\n{}\n", arabic_text))
+            .style(state.theme.strong.add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Right)
+            .wrap(Wrap { trim: true }),
+        content_layout[0],
+    );
+
+    if let Some(translit) = ayah.transliteration.as_deref() {
         frame.render_widget(
-            Paragraph::new(left_lines)
+            Paragraph::new(format!("\n{}", translit))
+                .style(state.theme.muted)
+                .wrap(Wrap { trim: true }),
+            content_layout[1],
+        );
+    }
+
+    if state.show_translation {
+        frame.render_widget(
+            Paragraph::new(format!("\n{}", ayah.translation.as_deref().unwrap_or("-")))
                 .style(state.theme.frame)
                 .wrap(Wrap { trim: true }),
-            cols[0],
-        );
-
-        frame.render_widget(
-            Paragraph::new(format_arabic(&ayah.arabic_text))
-                .style(state.theme.strong)
-                .alignment(Alignment::Right)
-                .wrap(Wrap { trim: true }),
-            cols[1],
-        );
-    } else {
-        let mut lines = vec![Line::from(Span::styled(
-            format_arabic(&ayah.arabic_text),
-            state.theme.strong,
-        ))];
-        if let Some(translit) = ayah.transliteration.as_deref() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(translit, state.theme.muted)));
-        }
-        if state.show_translation {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                ayah.translation.as_deref().unwrap_or("-"),
-                state.theme.frame,
-            )));
-        }
-
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(state.theme.frame)
-                .wrap(Wrap { trim: true }),
-            rows[1],
+            content_layout[2],
         );
     }
 }
@@ -709,7 +701,7 @@ fn draw_search_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
                     "{}:{} {}",
                     hit.surah_no,
                     hit.ayah_no,
-                    format_arabic(&hit.snippet)
+                    format_arabic(&hit.snippet, None)
                 );
                 if idx == state.selected_search_idx {
                     ListItem::new(line).style(state.theme.accent)
@@ -904,11 +896,11 @@ mod tests {
     fn test_arabic_reshape_behavior() {
         use super::format_arabic;
         let text = "Hello World";
-        let reshaped = format_arabic(text);
+        let reshaped = format_arabic(text, None);
         assert_eq!(text, reshaped, "Non-Arabic text should remain unchanged");
 
         let mixed = "Hello سلام World";
-        let reshaped_mixed = format_arabic(mixed);
+        let reshaped_mixed = format_arabic(mixed, None);
         assert_ne!(mixed, reshaped_mixed, "Arabic text should be reshaped");
         assert!(
             reshaped_mixed.contains("Hello"),
@@ -920,7 +912,7 @@ mod tests {
         );
 
         let with_harakat = "بِسْمِ اللَّهِ";
-        let reshaped_harakat = format_arabic(with_harakat);
+        let reshaped_harakat = format_arabic(with_harakat, None);
         assert_ne!(
             with_harakat, reshaped_harakat,
             "Arabic with harakat should be reshaped"
