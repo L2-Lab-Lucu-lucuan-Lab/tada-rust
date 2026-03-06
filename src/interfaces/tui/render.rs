@@ -1,7 +1,7 @@
-use super::*;
+﻿use super::*;
 use arabic_reshaper::ArabicReshaper;
 use ratatui::layout::Alignment;
-use ratatui::widgets::{Gauge, Padding};
+use ratatui::widgets::{Gauge, ListState, Padding};
 use unicode_bidi::BidiInfo;
 use unicode_normalization::UnicodeNormalization;
 
@@ -231,7 +231,8 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
         );
     } else {
         frame.render_widget(
-            Paragraph::new(pad_line_end(build_nav_line(state), inner.width)).style(state.theme.frame),
+            Paragraph::new(pad_line_end(build_nav_line(state), inner.width))
+                .style(state.theme.frame),
             inner,
         );
     }
@@ -972,24 +973,24 @@ fn draw_palette_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     let items = state.filtered_palette();
     let list_items: Vec<ListItem<'_>> = items
         .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            if idx == state.palette_selected_idx {
-                ListItem::new(Line::from(vec![
-                    Span::styled("> ", state.theme.accent),
-                    Span::styled(item.label, state.theme.strong),
-                ]))
-            } else {
-                ListItem::new(Line::from(vec![
-                    Span::styled("  ", state.theme.muted),
-                    Span::styled(item.label, state.theme.frame),
-                ]))
-            }
-        })
+        .map(|item| ListItem::new(Line::from(vec![Span::raw(item.label)])))
         .collect();
-    frame.render_widget(
-        List::new(list_items).block(Block::default().style(state.theme.panel)),
+
+    let theme = state.current_theme();
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.palette_selected_idx));
+
+    frame.render_stateful_widget(
+        List::new(list_items)
+            .block(Block::default().style(state.theme.panel))
+            .highlight_style(
+                Style::default()
+                    .bg(theme.highlight_bg)
+                    .fg(theme.highlight_fg),
+            )
+            .highlight_symbol("> "),
         sections[1],
+        &mut list_state,
     );
 }
 
@@ -1023,35 +1024,44 @@ fn draw_search_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
         sections[0],
     );
 
-    let items: Vec<ListItem<'_>> = if state.search_results.is_empty() {
-        vec![ListItem::new(Line::from(vec![Span::styled(
-            "Belum ada hasil. Tekan Enter untuk mencari.",
-            state.theme.muted,
-        )]))]
+    let (items, mut list_state) = if state.search_results.is_empty() {
+        (
+            vec![ListItem::new(Line::from(vec![Span::styled(
+                "Belum ada hasil. Tekan Enter untuk mencari.",
+                state.theme.muted,
+            )]))],
+            ListState::default(),
+        )
     } else {
-        state
+        let items: Vec<ListItem<'_>> = state
             .search_results
             .iter()
-            .enumerate()
-            .map(|(idx, hit)| {
-                let line = Line::from(vec![
+            .map(|hit| {
+                ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{}:{} ", hit.surah_no, hit.ayah_no),
                         state.theme.accent,
                     ),
-                    Span::styled(hit.snippet.clone(), state.theme.frame),
-                ]);
-                if idx == state.selected_search_idx {
-                    ListItem::new(line).style(state.theme.card_focus)
-                } else {
-                    ListItem::new(line)
-                }
+                    Span::raw(hit.snippet.clone()),
+                ]))
             })
-            .collect()
+            .collect();
+        let mut s = ListState::default();
+        s.select(Some(state.selected_search_idx));
+        (items, s)
     };
-    frame.render_widget(
-        List::new(items).block(Block::default().style(state.theme.panel)),
+
+    let theme = state.current_theme();
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().style(state.theme.panel))
+            .highlight_style(
+                Style::default()
+                    .bg(theme.highlight_bg)
+                    .fg(theme.highlight_fg),
+            ),
         sections[1],
+        &mut list_state,
     );
 }
 
@@ -1073,36 +1083,45 @@ fn draw_bookmark_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(2)])
         .split(inner);
-    let items: Vec<ListItem<'_>> = if state.bookmarks.is_empty() {
-        vec![ListItem::new(Line::from(vec![Span::styled(
-            "Belum ada bookmark.",
-            state.theme.muted,
-        )]))]
+    let (items, mut list_state) = if state.bookmarks.is_empty() {
+        (
+            vec![ListItem::new(Line::from(vec![Span::styled(
+                "Belum ada bookmark.",
+                state.theme.muted,
+            )]))],
+            ListState::default(),
+        )
     } else {
-        state
+        let items: Vec<ListItem<'_>> = state
             .bookmarks
             .iter()
-            .enumerate()
-            .map(|(idx, b)| {
-                let line = Line::from(vec![
+            .map(|b| {
+                ListItem::new(Line::from(vec![
                     Span::styled(format!("#{} ", b.id), state.theme.accent),
-                    Span::styled(format!("{}:{} ", b.surah_no, b.ayah_no), state.theme.strong),
                     Span::styled(
-                        b.note.as_deref().unwrap_or("-").to_string(),
-                        state.theme.frame,
+                        format!("{}:{} ", b.surah_no, b.ayah_no),
+                        Style::default().add_modifier(Modifier::BOLD),
                     ),
-                ]);
-                if idx == state.selected_bookmark_idx {
-                    ListItem::new(line).style(state.theme.card_focus)
-                } else {
-                    ListItem::new(line)
-                }
+                    Span::raw(b.note.as_deref().unwrap_or("-").to_string()),
+                ]))
             })
-            .collect()
+            .collect();
+        let mut s = ListState::default();
+        s.select(Some(state.selected_bookmark_idx));
+        (items, s)
     };
-    frame.render_widget(
-        List::new(items).block(Block::default().style(state.theme.panel)),
+
+    let theme = state.current_theme();
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().style(state.theme.panel))
+            .highlight_style(
+                Style::default()
+                    .bg(theme.highlight_bg)
+                    .fg(theme.highlight_fg),
+            ),
         sections[0],
+        &mut list_state,
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1203,14 +1222,16 @@ mod tests {
 
     use super::{
         ReaderDensity, TuiState, VisibleWindow, ayah_row_height, can_show_sidebar_in_frame,
-        draw_ui,
-        compute_visible_window, filter_surah_indices, pad_line_end, padded_arabic_text,
+        compute_visible_window, draw_ui, filter_surah_indices, pad_line_end, padded_arabic_text,
         reader_density,
     };
-    use crate::{audio::AudioCache, domain::{Ayah, SurahMeta}};
-    use ratatui::{Terminal, backend::TestBackend};
+    use crate::{
+        audio::AudioCache,
+        domain::{Ayah, SurahMeta},
+    };
     use ratatui::layout::Rect;
     use ratatui::text::Line;
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn mk_surah(no: u16, name_id: &str) -> SurahMeta {
         SurahMeta {
@@ -1348,8 +1369,7 @@ mod tests {
         let backend = TestBackend::new(120, 32);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut state = mk_state_for_full_render();
-        state.status =
-            "STATUSMARKER alpha beta gamma delta epsilon zeta eta theta".to_string();
+        state.status = "STATUSMARKER alpha beta gamma delta epsilon zeta eta theta".to_string();
 
         terminal
             .draw(|frame| draw_ui(frame, &state))

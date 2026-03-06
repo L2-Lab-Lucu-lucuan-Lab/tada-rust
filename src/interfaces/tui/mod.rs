@@ -26,10 +26,12 @@ use crate::domain::{
 mod actions;
 mod input;
 mod render;
+mod theme;
 
 use actions::{apply_intent, ayah_ref_from_raw, sync_audio_tick};
 use input::map_key_to_intent;
 use render::{can_show_sidebar_in_frame, draw_ui, filter_surah_indices, frame_size_hint};
+use theme::{Theme, default_themes, load_themes};
 
 #[derive(Debug, Clone)]
 pub struct TuiLaunchOptions {
@@ -203,6 +205,7 @@ enum Intent {
     BookmarkMoveUp,
     BookmarkMoveDown,
     BookmarkJump,
+    CycleTheme,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,6 +220,7 @@ enum PaletteAction {
     NextSurah,
     PrevSurah,
     Quit,
+    CycleTheme,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -277,6 +281,11 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: "exit close",
         action: PaletteAction::Quit,
     },
+    PaletteCommand {
+        label: "Cycle theme",
+        keywords: "theme color",
+        action: PaletteAction::CycleTheme,
+    },
 ];
 
 struct ThemeStyles {
@@ -293,7 +302,7 @@ struct ThemeStyles {
 }
 
 impl ThemeStyles {
-    fn from_mode(mode: &str, color_enabled: bool) -> Self {
+    fn from_theme(theme: &Theme, color_enabled: bool) -> Self {
         if !color_enabled {
             return Self {
                 app_bg: Style::default(),
@@ -309,72 +318,28 @@ impl ThemeStyles {
             };
         }
 
-        let resolved = match mode {
-            "light" => "light",
-            "dark" => "dark",
-            _ => "dark",
-        };
-
-        if resolved == "light" {
-            Self {
-                app_bg: Style::default().bg(Color::Rgb(248, 241, 232)),
-                frame: Style::default().fg(Color::Rgb(63, 45, 31)),
-                muted: Style::default().fg(Color::Rgb(121, 96, 75)),
-                accent: Style::default()
-                    .fg(Color::Rgb(0, 139, 178))
-                    .add_modifier(Modifier::BOLD),
-                strong: Style::default()
-                    .fg(Color::Rgb(34, 24, 16))
-                    .add_modifier(Modifier::BOLD),
-                panel: Style::default()
-                    .fg(Color::Rgb(58, 42, 30))
-                    .bg(Color::Rgb(241, 231, 220)),
-                card: Style::default()
-                    .fg(Color::Rgb(58, 42, 30))
-                    .bg(Color::Rgb(246, 238, 228)),
-                card_active: Style::default()
-                    .fg(Color::Rgb(32, 24, 18))
-                    .bg(Color::Rgb(232, 224, 213))
-                    .add_modifier(Modifier::BOLD),
-                card_focus: Style::default()
-                    .fg(Color::Rgb(28, 31, 36))
-                    .bg(Color::Rgb(213, 232, 238))
-                    .add_modifier(Modifier::BOLD),
-                chip: Style::default()
-                    .fg(Color::Rgb(255, 255, 255))
-                    .bg(Color::Rgb(0, 139, 178))
-                    .add_modifier(Modifier::BOLD),
-            }
-        } else {
-            Self {
-                app_bg: Style::default().bg(Color::Rgb(18, 8, 4)),
-                frame: Style::default().fg(Color::Rgb(206, 187, 166)),
-                muted: Style::default().fg(Color::Rgb(128, 103, 84)),
-                accent: Style::default()
-                    .fg(Color::Rgb(48, 205, 236))
-                    .add_modifier(Modifier::BOLD),
-                strong: Style::default()
-                    .fg(Color::Rgb(242, 232, 221))
-                    .add_modifier(Modifier::BOLD),
-                panel: Style::default()
-                    .fg(Color::Rgb(210, 191, 170))
-                    .bg(Color::Rgb(28, 12, 4)),
-                card: Style::default()
-                    .fg(Color::Rgb(214, 199, 184))
-                    .bg(Color::Rgb(24, 10, 5)),
-                card_active: Style::default()
-                    .fg(Color::Rgb(243, 236, 228))
-                    .bg(Color::Rgb(38, 21, 13))
-                    .add_modifier(Modifier::BOLD),
-                card_focus: Style::default()
-                    .fg(Color::Rgb(245, 251, 255))
-                    .bg(Color::Rgb(12, 47, 57))
-                    .add_modifier(Modifier::BOLD),
-                chip: Style::default()
-                    .fg(Color::Rgb(8, 18, 22))
-                    .bg(Color::Rgb(48, 205, 236))
-                    .add_modifier(Modifier::BOLD),
-            }
+        Self {
+            app_bg: Style::default().bg(theme.bg),
+            frame: Style::default().fg(theme.fg),
+            muted: Style::default().fg(Color::Gray),
+            accent: Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+            strong: Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            panel: Style::default().fg(theme.fg).bg(theme.bg),
+            card: Style::default().fg(theme.fg).bg(theme.bg),
+            card_active: Style::default()
+                .fg(theme.highlight_fg)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+            card_focus: Style::default()
+                .fg(theme.highlight_fg)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+            chip: Style::default()
+                .fg(theme.highlight_fg)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
         }
     }
 }
@@ -398,9 +363,12 @@ struct TuiState {
     palette_input: String,
     palette_selected_idx: usize,
     search_input: String,
+    themes: Vec<Theme>,
+    theme_idx: usize,
     theme: ThemeStyles,
     audio_cache: AudioCache,
     active_qari: String,
+    color_enabled: bool,
     player: Option<AudioPlayer>,
 }
 
@@ -413,6 +381,13 @@ impl TuiState {
         audio_cache: AudioCache,
         active_qari: String,
     ) -> Self {
+        let themes = load_themes("theme.yml").unwrap_or_else(|_| default_themes());
+        let theme_idx = themes
+            .iter()
+            .position(|t| t.name.eq_ignore_ascii_case(theme_mode))
+            .unwrap_or(0);
+        let current_theme = &themes[theme_idx];
+
         Self {
             surahs,
             selected_surah_idx: 0,
@@ -433,11 +408,30 @@ impl TuiState {
             palette_input: String::new(),
             palette_selected_idx: 0,
             search_input: String::new(),
-            theme: ThemeStyles::from_mode(theme_mode, color_enabled),
+            themes: themes.clone(),
+            theme_idx,
+            theme: ThemeStyles::from_theme(current_theme, color_enabled),
             audio_cache,
             active_qari,
+            color_enabled,
             player: None,
         }
+    }
+
+    fn current_theme(&self) -> &Theme {
+        &self.themes[self.theme_idx]
+    }
+
+    fn set_theme(&mut self, idx: usize) {
+        if idx < self.themes.len() {
+            self.theme_idx = idx;
+            self.theme = ThemeStyles::from_theme(&self.themes[self.theme_idx], self.color_enabled);
+        }
+    }
+
+    fn next_theme(&mut self) {
+        let next = (self.theme_idx + 1) % self.themes.len();
+        self.set_theme(next);
     }
 
     fn current_surah(&self) -> &SurahMeta {

@@ -360,6 +360,10 @@ where
             }
             state.mode = UiMode::Reading;
         }
+        Intent::CycleTheme => {
+            state.next_theme();
+            state.status = format!("Tema diubah ke: {}", state.current_theme().name);
+        }
     }
 
     if !can_show_sidebar_in_frame(Rect::new(0, 0, terminal_width, terminal_height)) {
@@ -561,6 +565,17 @@ where
         }
         PaletteAction::Quit => {
             state.status = "Gunakan q untuk keluar".to_string();
+        }
+        PaletteAction::CycleTheme => {
+            apply_intent(
+                read_repo,
+                state_repo,
+                lang,
+                state,
+                Intent::CycleTheme,
+                terminal_width,
+                terminal_height,
+            )?;
         }
     }
     Ok(())

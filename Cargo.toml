@@ -29,6 +29,7 @@ arabic_reshaper = "0.4.2"
 unicode-bidi = "0.3.18"
 unicode-normalization = "0.1.25"
 textwrap = "0.16.2"
+serde_yaml = "0.9.34"
 
 [dev-dependencies]
 assert_cmd = "2.1"
