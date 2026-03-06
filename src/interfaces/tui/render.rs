@@ -1,6 +1,32 @@
 ﻿use super::*;
+use arabic_reshaper::ArabicReshaper;
 use ratatui::layout::Alignment;
 use ratatui::widgets::Padding;
+use unicode_bidi::BidiInfo;
+use unicode_normalization::UnicodeNormalization;
+
+fn format_arabic(text: &str) -> String {
+    let mut reshaper = ArabicReshaper::new();
+
+    if let Some(val) = reshaper.configuration.get_mut("delete_harakat") {
+        *val = false;
+    }
+    if let Some(val) = reshaper.configuration.get_mut("delete_tatweel") {
+        *val = false;
+    }
+
+    let normalized: String = text.nfkc().collect();
+
+    let reshaped = reshaper.reshape(&normalized);
+
+    let bidi_info = BidiInfo::new(&reshaped, None);
+    if let Some(para) = bidi_info.paragraphs.get(0) {
+        let line = para.range.clone();
+        bidi_info.reorder_line(para, line).to_string()
+    } else {
+        reshaped
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct UiScale {
@@ -81,7 +107,9 @@ fn sidebar_width(area_width: u16) -> u16 {
     let preferred = area_width.saturating_mul(30) / 100;
     let min_sidebar = 26;
     let max_sidebar = area_width.saturating_sub(46);
-    let capped_max = max_sidebar.max(min_sidebar).min(area_width.saturating_sub(1));
+    let capped_max = max_sidebar
+        .max(min_sidebar)
+        .min(area_width.saturating_sub(1));
     preferred.max(min_sidebar).min(capped_max)
 }
 
@@ -112,7 +140,11 @@ fn draw_surah_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(inner);
 
     let search_text = if state.surah_filter.is_empty() {
@@ -192,7 +224,7 @@ fn draw_surah_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
             Line::from(vec![
                 Span::styled(format!("{} ayat", surah.ayah_count), state.theme.muted),
                 Span::raw("  |  "),
-                Span::styled(&surah.name_ar, state.theme.accent),
+                Span::styled(format_arabic(&surah.name_ar), state.theme.accent),
             ]),
             if is_selected {
                 Line::from(Span::styled("TERBUKA", state.theme.chip))
@@ -279,10 +311,17 @@ fn draw_surah_summary(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
             Span::raw("  |  "),
             Span::styled(format!("posisi {}", progress), state.theme.muted),
             Span::raw("  |  "),
-            Span::styled(format!("audio {} @ {}", audio_state, speed), state.theme.accent),
+            Span::styled(
+                format!("audio {} @ {}", audio_state, speed),
+                state.theme.accent,
+            ),
         ]),
         Line::from(vec![Span::styled(
-            format!("Qari: {} ({})", state.active_qari, qari_name(&state.active_qari)),
+            format!(
+                "Qari: {} ({})",
+                state.active_qari,
+                qari_name(&state.active_qari)
+            ),
             state.theme.frame,
         )]),
     ];
@@ -294,7 +333,7 @@ fn draw_surah_summary(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiSta
     );
 
     frame.render_widget(
-        Paragraph::new(surah.name_ar.as_str())
+        Paragraph::new(format_arabic(&surah.name_ar))
             .style(state.theme.accent)
             .alignment(Alignment::Right),
         cols[1],
@@ -324,7 +363,11 @@ fn draw_control_bar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
             Span::raw("  "),
             Span::styled("Terjemahan ", state.theme.muted),
             Span::styled(
-                if state.show_translation { "[ON]" } else { "[OFF]" },
+                if state.show_translation {
+                    "[ON]"
+                } else {
+                    "[OFF]"
+                },
                 state.theme.chip,
             ),
             Span::raw("  "),
@@ -388,7 +431,13 @@ fn draw_ayah_list(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) 
         if ayah_idx >= window.end {
             break;
         }
-        draw_ayah_card(frame, rows[slot], &state.ayahs[ayah_idx], ayah_idx == state.selected_ayah_idx, state);
+        draw_ayah_card(
+            frame,
+            rows[slot],
+            &state.ayahs[ayah_idx],
+            ayah_idx == state.selected_ayah_idx,
+            state,
+        );
     }
 }
 
@@ -439,7 +488,11 @@ fn draw_ayah_card(
     let tools = Line::from(vec![
         Span::styled(
             format!("[{}]", ayah.ayah_no),
-            if is_selected { state.theme.chip } else { state.theme.muted },
+            if is_selected {
+                state.theme.chip
+            } else {
+                state.theme.muted
+            },
         ),
         Span::raw("  "),
         Span::styled("[play] [next]", state.theme.muted),
@@ -471,14 +524,17 @@ fn draw_ayah_card(
         );
 
         frame.render_widget(
-            Paragraph::new(ayah.arabic_text.as_str())
+            Paragraph::new(format_arabic(&ayah.arabic_text))
                 .style(state.theme.strong)
                 .alignment(Alignment::Right)
                 .wrap(Wrap { trim: true }),
             cols[1],
         );
     } else {
-        let mut lines = vec![Line::from(Span::styled(ayah.arabic_text.as_str(), state.theme.strong))];
+        let mut lines = vec![Line::from(Span::styled(
+            format_arabic(&ayah.arabic_text),
+            state.theme.strong,
+        ))];
         if let Some(translit) = ayah.transliteration.as_deref() {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(translit, state.theme.muted)));
@@ -562,7 +618,10 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
         Span::raw(" | "),
         Span::styled(&state.status, state.theme.frame),
         Span::raw(" | "),
-        Span::styled("Ctrl+K actions | / search | Tab pindah fokus | q keluar", state.theme.muted),
+        Span::styled(
+            "Ctrl+K actions | / search | Tab pindah fokus | q keluar",
+            state.theme.muted,
+        ),
     ]);
 
     let footer = Paragraph::new(line).style(state.theme.frame).block(
@@ -646,7 +705,12 @@ fn draw_search_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
             .iter()
             .enumerate()
             .map(|(idx, hit)| {
-                let line = format!("{}:{} {}", hit.surah_no, hit.ayah_no, hit.snippet);
+                let line = format!(
+                    "{}:{} {}",
+                    hit.surah_no,
+                    hit.ayah_no,
+                    format_arabic(&hit.snippet)
+                );
                 if idx == state.selected_search_idx {
                     ListItem::new(line).style(state.theme.accent)
                 } else {
@@ -775,8 +839,12 @@ fn inset_rect(area: Rect, margin_x: u16, margin_y: u16) -> Rect {
     Rect::new(
         area.x.saturating_add(clamped_x),
         area.y.saturating_add(clamped_y),
-        area.width.saturating_sub(clamped_x.saturating_mul(2)).max(1),
-        area.height.saturating_sub(clamped_y.saturating_mul(2)).max(1),
+        area.width
+            .saturating_sub(clamped_x.saturating_mul(2))
+            .max(1),
+        area.height
+            .saturating_sub(clamped_y.saturating_mul(2))
+            .max(1),
     )
 }
 
@@ -831,5 +899,32 @@ mod tests {
         assert!(end <= 20);
         assert!(end - start <= 5);
     }
-}
 
+    #[test]
+    fn test_arabic_reshape_behavior() {
+        use super::format_arabic;
+        let text = "Hello World";
+        let reshaped = format_arabic(text);
+        assert_eq!(text, reshaped, "Non-Arabic text should remain unchanged");
+
+        let mixed = "Hello سلام World";
+        let reshaped_mixed = format_arabic(mixed);
+        assert_ne!(mixed, reshaped_mixed, "Arabic text should be reshaped");
+        assert!(
+            reshaped_mixed.contains("Hello"),
+            "Should still contain 'Hello'"
+        );
+        assert!(
+            reshaped_mixed.contains("World"),
+            "Should still contain 'World'"
+        );
+
+        let with_harakat = "بِسْمِ اللَّهِ";
+        let reshaped_harakat = format_arabic(with_harakat);
+        assert_ne!(
+            with_harakat, reshaped_harakat,
+            "Arabic with harakat should be reshaped"
+        );
+        assert!(!reshaped_harakat.is_empty());
+    }
+}
