@@ -43,10 +43,27 @@ fn init_tracing(verbose: u8, debug: bool) {
         "info".to_string()
     };
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(computed));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_log_filter(&computed)));
 
     let _ = tracing_subscriber::fmt()
         .with_target(false)
         .with_env_filter(filter)
         .try_init();
+}
+
+fn default_log_filter(level: &str) -> String {
+    let crate_name = env!("CARGO_CRATE_NAME");
+    format!("{crate_name}={level}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_log_filter;
+
+    #[test]
+    fn default_log_filter_only_enables_app_target() {
+        assert_eq!(default_log_filter("info"), "tada_rust=info");
+        assert_eq!(default_log_filter("debug"), "tada_rust=debug");
+    }
 }

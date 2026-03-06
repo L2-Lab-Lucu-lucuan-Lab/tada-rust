@@ -20,11 +20,20 @@
 
 ## 🚀 Instalasi
 
-Pastikan Anda telah menginstal [Rust & Cargo](https://rustup.rs/).
+### 1. Download Binary (Recommended)
+Anda tidak perlu menginstal Rust untuk menjalankan aplikasi ini. Cukup unduh binary yang sesuai dengan sistem operasi Anda dari halaman [Releases](https://github.com/L2-Lab-Lucu-lucuan-Lab/tada-rust/releases).
+
+1. Buka halaman [Releases](https://github.com/L2-Lab-Lucu-lucuan-Lab/tada-rust/releases).
+2. Unduh file `.zip` atau `.tar.gz` yang sesuai (Windows, Linux, atau macOS).
+3. Ekstrak file tersebut.
+4. Jalankan aplikasi `tada-rust` (Linux/macOS) atau `tada-rust.exe` (Windows) dari terminal.
+
+### 2. Build dari Source (Untuk Developer)
+Jika Anda ingin mengembangkan atau memodifikasi kode, pastikan Anda telah menginstal [Rust & Cargo](https://rustup.rs/).
 
 ```bash
 # Clone repository
-git clone https://github.com/username/tada-rust.git
+git clone https://github.com/L2-Lab-Lucu-lucuan-Lab/tada-rust.git
 cd tada-rust
 
 # Build dan jalankan
@@ -43,24 +52,35 @@ Jika teks Arab terlihat terputus-putus, pastikan terminal Anda menggunakan salah
 
 ### Mode TUI (Default)
 Jalankan aplikasi tanpa argumen untuk masuk ke mode TUI:
+
+**Jika menggunakan binary:**
 ```bash
-cargo run
+# Linux / macOS
+./tada-rust
+
+# Windows
+.\tada-rust.exe
+```
+
+**Jika menggunakan source code:**
+```bash
+cargo run --release
 ```
 
 #### Kontrol Keyboard (TUI)
-| Tombol | Fungsi |
-|--------|--------|
+| Tombol    | Fungsi                         |
+| --------- | ------------------------------ |
 | `j` / `↓` | Ayat Berikutnya / Kursor Bawah |
-| `k` / `↑` | Ayat Sebelumnya / Kursor Atas |
-| `n` | Surah Berikutnya |
-| `p` | Surah Sebelumnya |
-| `Spasi` | Play / Pause Audio |
-| `[` / `]` | Audio Mundur / Maju |
-| `s` | Stop Audio |
-| `/` | Buka Pencarian |
-| `f` | Tambah Bookmark |
-| `Ctrl+b` | Toggle Sidebar Surah |
-| `q` | Keluar Aplikasi |
+| `k` / `↑` | Ayat Sebelumnya / Kursor Atas  |
+| `n`       | Surah Berikutnya               |
+| `p`       | Surah Sebelumnya               |
+| `Spasi`   | Play / Pause Audio             |
+| `[` / `]` | Audio Mundur / Maju            |
+| `s`       | Stop Audio                     |
+| `/`       | Buka Pencarian                 |
+| `f`       | Tambah Bookmark                |
+| `Ctrl+b`  | Toggle Sidebar Surah           |
+| `q`       | Keluar Aplikasi                |
 
 ### Mode CLI
 Gunakan perintah CLI untuk operasi cepat atau scripting:

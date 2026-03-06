@@ -202,7 +202,10 @@ impl AudioPlayer {
         if ayahs.is_empty() {
             return Err(anyhow!("Playlist audio kosong"));
         }
-        let stream = OutputStreamBuilder::open_default_stream()?;
+        let mut stream = OutputStreamBuilder::open_default_stream()?;
+        // Prevent rodio from writing a line to stderr whenever playback is stopped
+        // and the stream gets dropped while the TUI is active.
+        stream.log_on_drop(false);
         let mut player = Self {
             stream,
             sink: None,

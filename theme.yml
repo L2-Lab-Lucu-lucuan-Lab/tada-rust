@@ -1,0 +1,49 @@
+themes:
+  - name: Midnight
+    bg: Black
+    fg: White
+    highlight_bg: "#6200EE"
+    highlight_fg: White
+    accent: Magenta
+
+  - name: Light
+    bg: White
+    fg: Black
+    highlight_bg: Blue
+    highlight_fg: White
+    accent: Blue
+
+  - name: Dark
+    bg: "#121212"
+    fg: "#E0E0E0"
+    highlight_bg: Cyan
+    highlight_fg: Black
+    accent: Cyan
+
+  - name: Solarized
+    bg: "#FDF6E3"
+    fg: "#657B83"
+    highlight_bg: "#B58900"
+    highlight_fg: "#FDF6E3"
+    accent: Yellow
+
+  - name: Nord
+    bg: "#2E3440"
+    fg: "#D8DEE3"
+    highlight_bg: "#88C0D0"
+    highlight_fg: "#2E3440"
+    accent: "#88C0D0"
+
+  - name: Cyberpunk
+    bg: "#000000"
+    fg: "#00FFFF"
+    highlight_bg: "#BC00FF"
+    highlight_fg: "#FFFFFF"
+    accent: "#FF00FF"
+
+  - name: Dracula
+    bg: "#282A36"
+    fg: "#F8F8F2"
+    highlight_bg: "#FF79C6"
+    highlight_fg: "#282A36"
+    accent: "#FF79C6"
