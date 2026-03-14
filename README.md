@@ -7,6 +7,8 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/built_with-Rust-orange.svg)
 
+![Tampilan Awal](docs/home-first.png)
+
 ## ✨ Fitur Utama
 
 - **Terminal User Interface (TUI) Modern**: Antarmuka satu layar yang kaya fitur menggunakan `ratatui`.
